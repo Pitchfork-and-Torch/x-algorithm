@@ -44,6 +44,12 @@ param!(
     "rust_home_mixer_enable_tweet_mixer_source",
     false
 );
+param!(
+    EnablePopularTopicsSource,
+    bool,
+    "rust_home_mixer_enable_popular_topics_source",
+    false
+);
 
 param!(
     EnableSimclustersSource,

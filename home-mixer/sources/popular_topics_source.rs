@@ -1,5 +1,6 @@
 use crate::models::candidate::PostCandidate;
 use crate::models::query::ScoredPostsQuery;
+use crate::params::EnablePopularTopicsSource;
 use std::sync::Arc;
 use tonic::async_trait;
 use xai_candidate_pipeline::component_library::clients::StratoClient;
@@ -53,7 +54,9 @@ pub struct PopularTopicsSource {
 #[async_trait]
 impl Source<ScoredPostsQuery, PostCandidate> for PopularTopicsSource {
     fn enable(&self, query: &ScoredPostsQuery) -> bool {
-        false
+        query.params.get(EnablePopularTopicsSource)
+            && !query.in_network_only
+            && !query.has_cached_posts
     }
 
     async fn source(&self, query: &ScoredPostsQuery) -> Result<Vec<PostCandidate>, String> {
@@ -98,5 +101,31 @@ impl Source<ScoredPostsQuery, PostCandidate> for PopularTopicsSource {
             .collect();
 
         Ok(candidates)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xai_candidate_pipeline::component_library::clients::MockStratoClient;
+
+    fn source() -> PopularTopicsSource {
+        PopularTopicsSource {
+            strato_client: Arc::new(MockStratoClient::default()),
+        }
+    }
+
+    #[test]
+    fn enable_returns_false_by_default() {
+        assert!(!source().enable(&ScoredPostsQuery::default()));
+    }
+
+    #[test]
+    fn enable_returns_false_when_in_network_only() {
+        let query = ScoredPostsQuery {
+            in_network_only: true,
+            ..Default::default()
+        };
+        assert!(!source().enable(&query));
     }
 }
