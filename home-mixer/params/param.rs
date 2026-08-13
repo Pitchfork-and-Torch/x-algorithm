@@ -204,6 +204,18 @@ param!(
     "rust_home_mixer_phoenix_retrieval_enable_fallback",
     false
 );
+param!(
+    PhoenixXdsMaxRetries,
+    u32,
+    "rust_home_mixer_phoenix_xds_max_retries",
+    0
+);
+param!(
+    EnablePhoenixFallback,
+    bool,
+    "rust_home_mixer_phoenix_enable_fallback",
+    false
+);
 
 param!(
     PhoenixRankerNewUserInferenceClusterId,
