@@ -6,6 +6,7 @@ pub mod jetfuel_frame_source;
 pub mod phoenix_moe_source;
 pub mod phoenix_source;
 pub mod phoenix_topics_source;
+pub mod popular_topics_source;
 pub mod prompts_source;
 pub mod push_to_home_source;
 pub mod reverse_chron_posts_source;

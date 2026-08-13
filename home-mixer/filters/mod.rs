@@ -14,6 +14,7 @@ pub mod muted_keyword_filter;
 pub mod new_user_min_engagement_filter;
 pub mod oon_nsfw_simclusters_filter;
 pub mod oon_retweet_reply_filter;
+pub mod popular_topics_author_dedup_filter;
 pub mod previously_seen_posts_backup_filter;
 pub mod previously_seen_posts_filter;
 pub mod previously_served_posts_filter;
