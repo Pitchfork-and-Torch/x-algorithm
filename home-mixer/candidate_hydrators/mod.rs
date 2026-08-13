@@ -1,6 +1,7 @@
 pub mod ads_brand_safety_vf_hydrator;
 pub mod bidirectional_follow_hydrator;
 pub mod blocked_by_hydrator;
+pub mod broadcast_liveness_hydrator;
 pub mod conversation_gap_ancestor_hydrator;
 pub mod core_data_candidate_hydrator;
 pub mod engagement_counts_hydrator;
