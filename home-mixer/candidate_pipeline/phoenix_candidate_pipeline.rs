@@ -1010,6 +1010,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires internal xAI feature-switch YAML not shipped in this repo"]
     #[cfg(target_os = "macos")]
     fn test_feature_switches() {
         use std::env;
