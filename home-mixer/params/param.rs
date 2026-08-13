@@ -950,6 +950,12 @@ param!(
     "rust_home_mixer_enable_topic_feedback_context",
     false
 );
+param!(
+    EnableBroadcastLivenessHydrator,
+    bool,
+    "rust_home_mixer_enable_broadcast_liveness_hydrator",
+    false
+);
 
 param!(
     EnablePhoenixRequestCacheSideEffect,

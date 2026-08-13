@@ -1,6 +1,7 @@
 use crate::clients::tweet_entity_service_client::TESClient;
 use crate::models::candidate::{CandidateHelpers, PostCandidate};
 use crate::models::query::ScoredPostsQuery;
+use crate::params::EnableBroadcastLivenessHydrator;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,7 +80,7 @@ fn broadcast_id_from_urls(urls: Option<&UrlEntities>) -> Option<String> {
 #[async_trait]
 impl Hydrator<ScoredPostsQuery, PostCandidate> for BroadcastLivenessHydrator {
     fn enable(&self, query: &ScoredPostsQuery) -> bool {
-        false
+        query.params.get(EnableBroadcastLivenessHydrator)
     }
 
     async fn hydrate(
@@ -221,6 +222,14 @@ mod tests {
             author_id: 42,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn enable_returns_false_by_default() {
+        let tes = Arc::new(MockTESClient::default());
+        let strato = MockStratoClient::default();
+        let h = BroadcastLivenessHydrator::new(tes, Arc::new(strato));
+        assert!(!h.enable(&query()));
     }
 
     #[tokio::test]
