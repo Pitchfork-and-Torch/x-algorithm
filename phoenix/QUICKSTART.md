@@ -9,7 +9,7 @@ Run every command from this directory (the export root).
 
 ## Requirements
 
-- Linux with an NVIDIA GPU and CUDA 12
+- Linux with an NVIDIA GPU and CUDA 12+ (validated on 13.2; see README)
 - `uv` and Python 3.11 or newer
 - A Rust toolchain and `protoc` 3.15 or newer
 
