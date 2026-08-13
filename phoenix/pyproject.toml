@@ -6,7 +6,7 @@ version = "0.1.0"
 description = "Phoenix — X's open-source recommendation algorithm (ranking + retrieval, single-host JAX)."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { file = "LICENSE" }
+license = { text = "Apache-2.0" }
 dependencies = [
     "dm-haiku==0.0.16",
     "jax[cuda12]==0.8.1 ; sys_platform == 'linux'",
