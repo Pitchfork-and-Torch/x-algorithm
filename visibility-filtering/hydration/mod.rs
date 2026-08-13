@@ -68,6 +68,7 @@ impl CandidateFeatures {
         candidates
             .iter()
             .map(|c| {
+                let safety_hydration_failed = !self.safety_labels.contains_key(&c.tweet_id);
                 assemble(
                     c,
                     self.tweet_features
@@ -80,6 +81,7 @@ impl CandidateFeatures {
                         .cloned()
                         .unwrap_or_default(),
                     self.relationships.get_or_default(&c.tweet_id),
+                    safety_hydration_failed,
                     self.exclusive_content
                         .get(&c.tweet_id)
                         .cloned()
@@ -385,6 +387,36 @@ mod tests {
         assert_eq!(c.tweet_features.core.text, "two");
         assert!(c.author_features.is_suspended);
         assert!(c.relationship.viewer_follows_author);
+        assert!(!c.safety_hydration_failed);
+    }
+
+    #[test]
+    fn assemble_marks_failed_safety_label_hydration_without_dropping_candidate() {
+        let candidate = resolve_candidate(&raw(1, Some(100)), &HashMap::new()).unwrap();
+        let results = CandidateFeatures {
+            tweet_features: HashMap::new(),
+            author_features: TweetHydrationBatch::from_results(
+                [TweetId(1)],
+                HashMap::from([(
+                    TweetId(1),
+                    Ok::<_, anyhow::Error>(Some(AuthorFeatures::default())),
+                )]),
+            ),
+            safety_labels: HashMap::new(),
+            relationships: TweetHydrationBatch::from_results(
+                [TweetId(1)],
+                HashMap::from([(
+                    TweetId(1),
+                    Ok::<_, anyhow::Error>(Some(ViewerAuthorRelationship::default())),
+                )]),
+            ),
+            exclusive_content: HashMap::new(),
+        };
+
+        let assembled = results.assemble(&[candidate]);
+
+        assert_eq!(assembled.len(), 1);
+        assert!(assembled[0].safety_hydration_failed);
     }
 
     fn raw(tweet_id: u64, request_author_id: Option<u64>) -> RawCandidate {
