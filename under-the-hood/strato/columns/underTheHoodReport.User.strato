@@ -209,18 +209,19 @@ def buildReportJson(
       }
     }
     .groupBy { t => (t._1, t._2) }
+    .toList
     .flatMap { g =>
       val name = g._1._1
       val source = g._1._2
       val days = g._2
         .flatMap { t => t._3.days.getOrElse(Seq.empty) }
         .groupBy { d => d.dayOfMonth.getOrElse(0) }
+        .toList
         .flatMap { dg =>
           dg._2.headOption.map { first =>
             dg._2.foldLeft(first) { (best, d) => bestDayRow(best, d) }
           }
         }
-        .toList
       val posts = sumCarried(Some(days))
       Some({
         label = name,
