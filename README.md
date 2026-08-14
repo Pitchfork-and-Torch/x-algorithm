@@ -109,8 +109,8 @@ Ranking sets the order. Whether a post can be shown at all is decided separately
 │  ┌────────────────────────────────────────────────────────────────────────────────────┐  │
 │  │ 5. SCORING                                                                         │  │
 │  │    <a href="home-mixer/scorers/phoenix_scorer.rs">PhoenixScorer</a>   a probability for each action the viewer might take             │  │
-│  │    <a href="home-mixer/scorers/ranking_scorer.rs">RankingScorer</a>   weighted sum, then repeated-author decay, an                    │  │
-│  │                    out-of-network discount, a new-author boost                     │  │
+│  │    <a href="home-mixer/scorers/ranking_scorer.rs">RankingScorer</a>   weighted sum, then author-size IPS, repeated-author             │  │
+│  │                    decay, an out-of-network discount, a new-author boost           │  │
 │  │    <a href="home-mixer/scorers/vm_ranker.rs">VMRanker</a>        calls the reranking service in <a href="vm-ranker/">vm-ranker/</a>                       │  │
 │  └────────────────────────────────────────────────────────────────────────────────────┘  │
 │                                            ▼                                             │
@@ -329,8 +329,9 @@ Final Score = Σ (weight_i × P(action_i))
 
 Positive actions carry positive weights, negative actions negative ones. The weights are in [`home-mixer/params/param.rs`](home-mixer/params/param.rs); the arithmetic is in [`home-mixer/scorers/ranking_scorer.rs`](home-mixer/scorers/ranking_scorer.rs).
 
-Three adjustments follow:
+Four adjustments follow:
 
+- **Author-size IPS**: a batch-mean-normalized inverse-propensity multiplier on `ln(1 + followers)`. Equal Phoenix scores are not ranked by audience size. Quality still wins: the default clamp is 2x, so a large-author post that is 3x more relevant still ranks higher. Math: [`docs/MERITOCRATIC_AUTHOR_SIZE_IPS.md`](docs/MERITOCRATIC_AUTHOR_SIZE_IPS.md).
 - **Author Diversity**: each post after an author's first is multiplied by a decaying factor, down to a floor.
 - **Out-of-Network Discount**: posts from accounts the viewer does not follow are multiplied by a factor below 1, as are replies and reposts from accounts the viewer does follow.
 - **New-Author Boost**: posts from authors whose impressions are below a threshold are lifted toward a target position.

@@ -238,6 +238,24 @@ param!(
     0.25
 );
 param!(
+    EnableAuthorSizeIps,
+    bool,
+    "rust_home_mixer_enable_author_size_ips",
+    true
+);
+param!(
+    AuthorSizeIpsAlpha,
+    f64,
+    "rust_home_mixer_author_size_ips_alpha",
+    0.5
+);
+param!(
+    AuthorSizeIpsMaxBoost,
+    f64,
+    "rust_home_mixer_author_size_ips_max_boost",
+    2.0
+);
+param!(
     LogSlateContext,
     bool,
     "rust_home_mixer_log_slate_context",
