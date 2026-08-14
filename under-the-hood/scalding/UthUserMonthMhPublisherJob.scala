@@ -212,10 +212,10 @@ object UthUserMonthMhPublisherApp {
                   .groupBy { case (_, _, day, _, _) => day }
                   .map {
                     case (day, dayRows) =>
-                      val best = dayRows.maxBy {
-                        case (_, _, _, carried, removed) => (carried, removed)
-                      }
-                      UthDayCarriedRemoved(Some(day), Some(best._4), Some(best._5))
+                      val (carried, removed) = dayRows
+                        .map { case (_, _, _, c, r) => (c, r) }
+                        .max
+                      UthDayCarriedRemoved(Some(day), Some(carried), Some(removed))
                   }
                   .toList
                   .sortBy(_.dayOfMonth.getOrElse(0))
