@@ -29,7 +29,7 @@ object UthLabelSource {
    *
    * Named cases are only those present on published spam.rtf usage
    * (BotMakerAction, ToolAction). A Grok/LLM union member is detected by
-   * Product prefix so this compiles if that case is absent from the IDL.
+   * simple class name so this compiles if that case is absent from the IDL.
    */
   private[under_the_hood] def coarseCategory(source: SafetyLabelSource): Option[String] =
     source match {
@@ -48,6 +48,8 @@ object UthLabelSource {
     isGrokName(productName) || isGrokName(typeName)
   }
 
-  private def isGrokName(name: String): Boolean =
-    name == "GrokAnnotationAction" || name.contains("GrokAnnotation")
+  private def isGrokName(name: String): Boolean = {
+    val simple = name.split('.').last.split('$').last
+    simple == "GrokAnnotationAction" || simple.startsWith("GrokAnnotation")
+  }
 }
