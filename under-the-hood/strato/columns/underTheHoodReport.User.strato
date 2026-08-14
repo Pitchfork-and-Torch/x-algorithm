@@ -209,7 +209,7 @@ def buildReportJson(
         (underTheHoodLabels.postLabelName(raw), postLabelSource(agg.source), raw, agg)
       }
     }
-    .groupBy { t => (t._1, t._2) }
+    .groupBy { case (name, source, _, _) => (name, source) }
     .toList
     .flatMap { case ((name, source), rows) =>
       val days = rows
