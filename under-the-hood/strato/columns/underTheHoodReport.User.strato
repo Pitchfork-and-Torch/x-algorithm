@@ -227,6 +227,8 @@ def buildReportJson(
         }
       }
     }
+    .toList
+    .sortBy { row => (row.label, row.source) }
 
   val accountLabels = userMonth.accountLabelAgg
     .getOrElse(Seq.empty)
