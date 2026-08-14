@@ -108,7 +108,20 @@ object UnderTheHoodCommon {
       if (a.asOfYyyymmdd.getOrElse(Int.MinValue) >= b.asOfYyyymmdd.getOrElse(Int.MinValue)) a
       else b
     }.values
-      .map(r => r.copy(source = UthLabelSource.persistToken(r.source)))
+      .map { r =>
+        UthDailyPostLabel(
+          userId = r.userId,
+          authoredYyyymmdd = r.authoredYyyymmdd,
+          label = r.label,
+          carried = r.carried,
+          removed = r.removed,
+          asOfYyyymmdd = r.asOfYyyymmdd,
+          observationAgeDays = r.observationAgeDays,
+          isFinal = r.isFinal,
+          postObservationDays = r.postObservationDays,
+          source = UthLabelSource.persistToken(r.source)
+        )
+      }
 
   def parseUserIds(args: Args): Set[Long] = {
     val raw = args.list("userIds").flatMap(_.split(",")).map(_.trim).filter(_.nonEmpty)
