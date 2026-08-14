@@ -19,6 +19,7 @@ object UthLabelSource {
       case Some(Automated) => Some(Automated)
       case Some(Manual) => Some(Manual)
       case Some(Llm) => Some(Llm)
+      case Some(Unknown) | Some("other") | Some("unavailable") => None
       case _ => None
     }
 
@@ -39,10 +40,14 @@ object UthLabelSource {
     }
 
   private def isLlmVariant(source: SafetyLabelSource): Boolean = {
-    val name = source match {
+    val productName = source match {
       case p: Product => p.productPrefix
       case _ => ""
     }
-    name == "GrokAnnotationAction" || name.startsWith("GrokAnnotation")
+    val typeName = source.getClass.getSimpleName
+    isGrokName(productName) || isGrokName(typeName)
   }
+
+  private def isGrokName(name: String): Boolean =
+    name == "GrokAnnotationAction" || name.contains("GrokAnnotation")
 }
