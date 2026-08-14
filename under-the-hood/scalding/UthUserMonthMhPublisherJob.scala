@@ -219,7 +219,11 @@ object UthUserMonthMhPublisherApp {
                   }
                   .toList
                   .sortBy(_.dayOfMonth.getOrElse(0))
-                UthPostLabelAggregate(Some(label), Some(days), source)
+                UthPostLabelAggregate(
+                  label = Some(label),
+                  days = Some(days),
+                  source = UthLabelSource.persistToken(source)
+                )
             }
             .toList
             .sortBy(a => (a.label.getOrElse(""), a.source.getOrElse("")))
