@@ -136,7 +136,8 @@ class UthDailyPostsBackfillApp {
               asOfYyyymmdd = Some(authoredDay),
               observationAgeDays = Some(0),
               isFinal = Some(true),
-              postObservationDays = Some(config.postObservationDays)
+              postObservationDays = Some(config.postObservationDays),
+              source = None
             )
         }
 

@@ -142,7 +142,8 @@ class UthDailyPostsApp {
               asOfYyyymmdd = Some(asOfDay),
               observationAgeDays = Some(0),
               isFinal = Some(true),
-              postObservationDays = Some(config.postObservationDays)
+              postObservationDays = Some(config.postObservationDays),
+              source = None
             )
         }
 
