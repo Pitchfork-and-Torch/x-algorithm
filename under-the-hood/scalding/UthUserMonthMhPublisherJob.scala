@@ -165,7 +165,10 @@ object UthUserMonthMhPublisherApp {
           label <- row.label
           carried <- row.carried
           removed <- row.removed
-        } yield ((userId, monthBucket(day)), (label, dayOfMonth(day), carried, removed))
+        } yield (
+          (userId, monthBucket(day)),
+          (label, row.source, dayOfMonth(day), carried, removed)
+        )
       },
       reducers
     )
@@ -202,24 +205,24 @@ object UthUserMonthMhPublisherApp {
 
           val postLabelAgg = labelsOpt
             .getOrElse(Nil)
-            .groupBy { case (label, _, _, _) => label }
+            .groupBy { case (label, source, _, _, _) => (label, source) }
             .map {
-              case (label, rows) =>
+              case ((label, source), rows) =>
                 val days = rows
-                  .groupBy { case (_, day, _, _) => day }
+                  .groupBy { case (_, _, day, _, _) => day }
                   .map {
                     case (day, dayRows) =>
                       val best = dayRows.maxBy {
-                        case (_, _, carried, removed) => (carried, removed)
+                        case (_, _, _, carried, removed) => (carried, removed)
                       }
-                      UthDayCarriedRemoved(Some(day), Some(best._3), Some(best._4))
+                      UthDayCarriedRemoved(Some(day), Some(best._4), Some(best._5))
                   }
                   .toList
                   .sortBy(_.dayOfMonth.getOrElse(0))
-                UthPostLabelAggregate(Some(label), Some(days))
+                UthPostLabelAggregate(Some(label), Some(days), source)
             }
             .toList
-            .sortBy(_.label.getOrElse(""))
+            .sortBy(a => (a.label.getOrElse(""), a.source.getOrElse("")))
 
           val accountLabelAgg = accountOpt
             .getOrElse(Nil)

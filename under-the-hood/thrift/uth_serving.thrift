@@ -53,6 +53,9 @@ enum UthFollowerClass {
 struct UthPostLabelAggregate {
   1: optional string label (personalDataType = 'TweetSafetyLabels')
   2: optional list<UthDayCarriedRemoved> days
+  // Coarse SafetyLabelSource category: automated | manual | other.
+  // Unset when the daily event/snapshot did not carry a source.
+  3: optional string source
 }(persisted = 'true', hasPersonalData = 'true')
 
 struct UthAccountLabelAggregate {
@@ -129,6 +132,9 @@ struct UthDailyPostLabel {
   7: optional i32 observationAgeDays
   8: optional bool isFinal
   9: optional i32 postObservationDays
+  // Coarse SafetyLabelSource category: automated | manual | other.
+  // Unset for snapshot/flag rows and events with no source variant.
+  10: optional string source
 }(persisted = 'true', hasPersonalData = 'true')
 
 struct UthDailyAccountLabel {

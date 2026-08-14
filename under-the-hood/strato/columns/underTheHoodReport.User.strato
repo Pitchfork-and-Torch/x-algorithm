@@ -194,6 +194,7 @@ def buildReportJson(
           label = underTheHoodLabels.postLabelName(raw),
           about = underTheHoodLabels.postLabelAbout(raw),
           effect = underTheHoodLabels.postLabelEffect(raw),
+          source = agg.source.filter { s => s.nonEmpty }.getOrElse("unavailable"),
           posts = posts,
           totalPostsInMonth = postCount,
           percentageOfPosts = formatPercentage(posts, postCount),
