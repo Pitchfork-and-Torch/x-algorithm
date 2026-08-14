@@ -11,22 +11,38 @@ object UthLabelSource {
   val Unknown = "unknown"
 
   def fromEventLabel(label: Option[SafetyLabel]): Option[String] =
-    label.flatMap(_.safetyLabelSource).map(coarseCategory)
+    persistToken(label.flatMap(_.safetyLabelSource).flatMap(coarseCategory))
+
+  /** Persist only automated | manual | llm. Unset/unmapped stay empty. */
+  def persistToken(source: Option[String]): Option[String] =
+    source match {
+      case Some(Automated) => Some(Automated)
+      case Some(Manual) => Some(Manual)
+      case Some(Llm) => Some(Llm)
+      case _ => None
+    }
 
   /**
    * Public reportJson tokens: automated | manual | llm | unknown.
    * Does not emit rule_id, actor_ldap, agent_tool, or VF-client type names.
    *
-   * The jobs compile against spam.rtf SafetyLabelSource. Published in-repo
-   * usage of that IDL only names BotMakerAction and ToolAction, so those
-   * map to automated/manual. GrokAnnotationAction exists on unpublished
-   * xai_x_thrift (VF client), not this IDL — it is not matched here and
-   * folds to unknown rather than inventing a case that may not compile.
+   * Named cases are only those present on published spam.rtf usage
+   * (BotMakerAction, ToolAction). A Grok/LLM union member is detected by
+   * Product prefix so this compiles if that case is absent from the IDL.
    */
-  private[under_the_hood] def coarseCategory(source: SafetyLabelSource): String =
+  private[under_the_hood] def coarseCategory(source: SafetyLabelSource): Option[String] =
     source match {
-      case SafetyLabelSource.BotMakerAction(_) => Automated
-      case SafetyLabelSource.ToolAction(_) => Manual
-      case _ => Unknown
+      case SafetyLabelSource.BotMakerAction(_) => Some(Automated)
+      case SafetyLabelSource.ToolAction(_) => Some(Manual)
+      case other if isLlmVariant(other) => Some(Llm)
+      case _ => None
     }
+
+  private def isLlmVariant(source: SafetyLabelSource): Boolean = {
+    val name = source match {
+      case p: Product => p.productPrefix
+      case _ => ""
+    }
+    name == "GrokAnnotationAction" || name.startsWith("GrokAnnotation")
+  }
 }

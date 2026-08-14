@@ -112,7 +112,7 @@ class UthDailyPostsBackfillApp {
               observationAgeDays = Some(age),
               isFinal = Some(age >= config.postObservationDays),
               postObservationDays = Some(config.postObservationDays),
-              source = source
+              source = UthLabelSource.persistToken(source)
             )
         }
 

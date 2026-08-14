@@ -167,7 +167,7 @@ object UthUserMonthMhPublisherApp {
           removed <- row.removed
         } yield (
           (userId, monthBucket(day)),
-          (label, row.source, dayOfMonth(day), carried, removed)
+          (label, UthLabelSource.persistToken(row.source), dayOfMonth(day), carried, removed)
         )
       },
       reducers

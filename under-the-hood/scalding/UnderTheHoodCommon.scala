@@ -101,7 +101,8 @@ object UnderTheHoodCommon {
     reducers: Int
   ): TypedPipe[UthDailyPostLabel] =
     applyReducers(
-      rows.groupBy(r => (r.userId, r.authoredYyyymmdd, r.label, r.source)),
+      rows.groupBy(r =>
+        (r.userId, r.authoredYyyymmdd, r.label, UthLabelSource.persistToken(r.source))),
       reducers
     ).reduce { (a, b) =>
       if (a.asOfYyyymmdd.getOrElse(Int.MinValue) >= b.asOfYyyymmdd.getOrElse(Int.MinValue)) a
