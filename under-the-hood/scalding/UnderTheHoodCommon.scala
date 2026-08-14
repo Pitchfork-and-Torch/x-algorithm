@@ -96,32 +96,46 @@ object UnderTheHoodCommon {
   def finalThroughDay(completeThroughDay: Int, asOfDay: Int, postObservationDays: Int): Int =
     math.min(completeThroughDay, addCalendarDays(asOfDay, -postObservationDays))
 
+  // Latest asOf is a full rewrite of (user, authored day, label). Keep every
+  // persistable source from that asOf; drop older asOf rows so a later sourced
+  // rewrite cannot sit beside an earlier unset row.
   def latestAsOfPostLabelRows(
     rows: TypedPipe[UthDailyPostLabel],
     reducers: Int
   ): TypedPipe[UthDailyPostLabel] =
     applyReducers(
-      rows.groupBy(r =>
-        (r.userId, r.authoredYyyymmdd, r.label, UthLabelSource.persistToken(r.source))),
+      rows.groupBy(r => (r.userId, r.authoredYyyymmdd, r.label)),
       reducers
-    ).reduce { (a, b) =>
-      if (a.asOfYyyymmdd.getOrElse(Int.MinValue) >= b.asOfYyyymmdd.getOrElse(Int.MinValue)) a
-      else b
-    }.values
-      .map { r =>
-        UthDailyPostLabel(
-          userId = r.userId,
-          authoredYyyymmdd = r.authoredYyyymmdd,
-          label = r.label,
-          carried = r.carried,
-          removed = r.removed,
-          asOfYyyymmdd = r.asOfYyyymmdd,
-          observationAgeDays = r.observationAgeDays,
-          isFinal = r.isFinal,
-          postObservationDays = r.postObservationDays,
-          source = UthLabelSource.persistToken(r.source)
-        )
+    ).mapValueStream { values =>
+      val all = values.toSeq
+      if (all.isEmpty) Iterator.empty
+      else {
+        val latest = all.map(_.asOfYyyymmdd.getOrElse(Int.MinValue)).max
+        all
+          .filter(_.asOfYyyymmdd.getOrElse(Int.MinValue) == latest)
+          .groupBy(r => UthLabelSource.persistToken(r.source))
+          .values
+          .iterator
+          .map { sameSource =>
+            val r = sameSource.maxBy { x =>
+              (x.carried.getOrElse(0L), x.removed.getOrElse(0L))
+            }
+            UthDailyPostLabel(
+              userId = r.userId,
+              authoredYyyymmdd = r.authoredYyyymmdd,
+              label = r.label,
+              carried = r.carried,
+              removed = r.removed,
+              asOfYyyymmdd = r.asOfYyyymmdd,
+              observationAgeDays = r.observationAgeDays,
+              isFinal = r.isFinal,
+              postObservationDays = r.postObservationDays,
+              source = UthLabelSource.persistToken(r.source)
+            )
+          }
       }
+    }.toTypedPipe
+      .map { case (_, row) => row }
 
   def parseUserIds(args: Args): Set[Long] = {
     val raw = args.list("userIds").flatMap(_.split(",")).map(_.trim).filter(_.nonEmpty)
