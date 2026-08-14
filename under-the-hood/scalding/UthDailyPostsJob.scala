@@ -358,7 +358,10 @@ object UthDailyPostsApp {
       } else (a._2, false, a._4)
     val (applyTs, applySrc) =
       if (a._5 != b._5) {
-        if (a._5 > b._5) (a._5, a._6) else (b._5, b._6)
+        val (later, earlier) = if (a._5 > b._5) (a, b) else (b, a)
+        // Last apply wins the timestamp. If that row is an unset snapshot
+        // duplicate, keep the other apply's persistable source.
+        (later._5, later._6.orElse(earlier._6))
       } else (a._5, a._6.orElse(b._6))
     (everApply, last._1, last._2, last._3, applyTs, applySrc)
   }
