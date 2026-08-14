@@ -209,6 +209,24 @@ def buildReportJson(
         }
       }
     }
+    .groupBy { row => (row.label, row.source) }
+    .flatMap { g =>
+      val rows = g._2
+      rows.headOption.map { head =>
+        val posts = rows.foldLeft(0L) { (acc, r) =>
+          if (r.posts > acc) { r.posts } else { acc }
+        }
+        {
+          label = head.label,
+          about = head.about,
+          effect = head.effect,
+          source = head.source,
+          posts = posts,
+          totalPostsInMonth = postCount,
+          percentageOfPosts = formatPercentage(posts, postCount),
+        }
+      }
+    }
 
   val accountLabels = userMonth.accountLabelAgg
     .getOrElse(Seq.empty)
