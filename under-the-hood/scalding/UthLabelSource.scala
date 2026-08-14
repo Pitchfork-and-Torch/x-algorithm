@@ -7,23 +7,26 @@ object UthLabelSource {
 
   val Automated = "automated"
   val Manual = "manual"
-  val Other = "other"
+  val Llm = "llm"
+  val Unknown = "unknown"
 
   def fromEventLabel(label: Option[SafetyLabel]): Option[String] =
     label.flatMap(_.safetyLabelSource).map(coarseCategory)
 
   /**
-   * Maps the per-event SafetyLabelSource union to a public category.
-   * Does not emit rule_id, actor_ldap, or agent_tool.
+   * Public reportJson tokens: automated | manual | llm | unknown.
+   * Does not emit rule_id, actor_ldap, agent_tool, or VF-client type names.
    *
-   * BotMakerAction = automated systems; ToolAction = manual/tool apply.
-   * Any other set variant (including LLM annotations if present on the IDL)
-   * is "other" so unknown union members stay compile-safe.
+   * The jobs compile against spam.rtf SafetyLabelSource. Published in-repo
+   * usage of that IDL only names BotMakerAction and ToolAction, so those
+   * map to automated/manual. GrokAnnotationAction exists on unpublished
+   * xai_x_thrift (VF client), not this IDL — it is not matched here and
+   * folds to unknown rather than inventing a case that may not compile.
    */
   private[under_the_hood] def coarseCategory(source: SafetyLabelSource): String =
     source match {
       case SafetyLabelSource.BotMakerAction(_) => Automated
       case SafetyLabelSource.ToolAction(_) => Manual
-      case _ => Other
+      case _ => Unknown
     }
 }

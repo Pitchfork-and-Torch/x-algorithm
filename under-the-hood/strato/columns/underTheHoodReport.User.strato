@@ -155,6 +155,14 @@ def sumDayCounts(days: Option[Seq[UthDayCount]]): Long =
     acc + d.count.getOrElse(0L)
   }
 
+def postLabelSource(source: Option[String]): String =
+  source match {
+    case Some("automated") => "automated"
+    case Some("manual") => "manual"
+    case Some("llm") => "llm"
+    case _ => "unknown"
+  }
+
 def formatPercentage(numerator: Long, denominator: Long): String = {
   if (denominator <= 0L) {
     "0%"
@@ -194,7 +202,7 @@ def buildReportJson(
           label = underTheHoodLabels.postLabelName(raw),
           about = underTheHoodLabels.postLabelAbout(raw),
           effect = underTheHoodLabels.postLabelEffect(raw),
-          source = agg.source.filter { s => s.nonEmpty }.getOrElse("unavailable"),
+          source = postLabelSource(agg.source),
           posts = posts,
           totalPostsInMonth = postCount,
           percentageOfPosts = formatPercentage(posts, postCount),
