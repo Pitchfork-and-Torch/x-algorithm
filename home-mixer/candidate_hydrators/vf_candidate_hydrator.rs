@@ -103,19 +103,23 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for VFCandidateHydrator {
         );
 
         let (in_network_result, oon_result) = join(in_network_future, oon_future).await;
-        let mut all_results: HashMap<u64, Result<Option<FilteredReason>>> = HashMap::new();
-        all_results.extend(in_network_result);
-        all_results.extend(oon_result);
 
         let mut hydrated_candidates = Vec::with_capacity(candidates.len());
         for candidate in candidates {
-            let primary_result = all_results.get(&candidate.tweet_id);
+            // Read the primary tweet from the map that matches its lane. Merging
+            // Recommendations over TimelineHome overwrites an in-network parent
+            // that is also another selected candidate's ancestor or quote.
+            let primary_result = if candidate.in_network.unwrap_or(false) {
+                in_network_result.get(&candidate.tweet_id)
+            } else {
+                oon_result.get(&candidate.tweet_id)
+            };
             let visibility_reason = match primary_result {
                 Some(Ok(Some(reason))) => Some(reason.clone()),
                 _ => None,
             };
 
-            let drop_ancillary = should_drop_ancillary(candidate, &all_results);
+            let drop_ancillary = should_drop_ancillary(candidate, &in_network_result, &oon_result);
 
             let hydrated = match primary_result {
                 Some(Err(err)) => Err(err.to_string()),
@@ -138,13 +142,14 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for VFCandidateHydrator {
 
 fn should_drop_ancillary(
     candidate: &PostCandidate,
-    vf_results: &HashMap<u64, Result<Option<FilteredReason>>>,
+    in_network_results: &HashMap<u64, Result<Option<FilteredReason>>>,
+    oon_results: &HashMap<u64, Result<Option<FilteredReason>>>,
 ) -> bool {
     for &ancestor_id in &candidate.ancestors {
         if candidate.tombstone_ancestor_ids.contains(&ancestor_id) {
             continue;
         }
-        if let Some(Ok(Some(reason))) = vf_results.get(&ancestor_id)
+        if let Some(Ok(Some(reason))) = oon_results.get(&ancestor_id)
             && should_drop_reason(reason)
         {
             return true;
@@ -152,14 +157,14 @@ fn should_drop_ancillary(
     }
 
     if let Some(quoted_id) = candidate.quoted_tweet_id
-        && let Some(Ok(Some(reason))) = vf_results.get(&quoted_id)
+        && let Some(Ok(Some(reason))) = oon_results.get(&quoted_id)
         && should_drop_reason(reason)
     {
         return true;
     }
 
     if let Some(retweeted_id) = candidate.retweeted_tweet_id
-        && let Some(Ok(Some(reason))) = vf_results.get(&retweeted_id)
+        && let Some(Ok(Some(reason))) = in_network_results.get(&retweeted_id)
         && should_drop_reason(reason)
     {
         return true;
@@ -173,6 +178,153 @@ fn should_drop_reason(reason: &FilteredReason) -> bool {
         FilteredReason::SafetyResult(safety_result) => {
             matches!(safety_result.action, Action::Drop(_))
         }
-        _ => true, 
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xai_visibility_filtering::models::SafetyResult;
+
+    struct LevelAwareVfClient {
+        timeline_home: HashMap<u64, FilteredReason>,
+        recommendations: HashMap<u64, FilteredReason>,
+    }
+
+    #[async_trait]
+    impl VfClient for LevelAwareVfClient {
+        async fn get_result(
+            &self,
+            tweet_ids: Vec<u64>,
+            safety_level: SafetyLevel,
+            _for_user_id: u64,
+            _context: Option<TwitterContextViewer>,
+        ) -> HashMap<u64, Result<Option<FilteredReason>>> {
+            let level_map = match safety_level {
+                TimelineHome => &self.timeline_home,
+                TimelineHomeRecommendations => &self.recommendations,
+                _ => return HashMap::new(),
+            };
+            tweet_ids
+                .into_iter()
+                .filter_map(|id| {
+                    level_map
+                        .get(&id)
+                        .cloned()
+                        .map(|reason| (id, Ok(Some(reason))))
+                })
+                .collect()
+        }
+    }
+
+    fn safety_reason(action: Action) -> FilteredReason {
+        FilteredReason::SafetyResult(SafetyResult {
+            action,
+            ..Default::default()
+        })
+    }
+
+    fn hydrator(client: LevelAwareVfClient) -> VFCandidateHydrator {
+        let client: Arc<dyn VfClient + Send + Sync> = Arc::new(client);
+        VFCandidateHydrator {
+            strato_vf_client: Arc::clone(&client),
+            xai_vf_client: client,
+        }
+    }
+
+    async fn hydrate(
+        hydrator: &VFCandidateHydrator,
+        candidates: &[PostCandidate],
+    ) -> Vec<PostCandidate> {
+        hydrator
+            .hydrate(&ScoredPostsQuery::default(), candidates)
+            .await
+            .into_iter()
+            .map(|result| result.expect("vf hydrate should succeed"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn in_network_parent_keeps_timeline_home_when_also_reply_ancestor() {
+        let parent_id = 10;
+        let reply_id = 11;
+        let oon_id = 20;
+        let client = LevelAwareVfClient {
+            timeline_home: HashMap::from([
+                (parent_id, safety_reason(Action::Interstitial)),
+                (reply_id, safety_reason(Action::Allow)),
+            ]),
+            recommendations: HashMap::from([
+                (parent_id, safety_reason(Action::Drop(Default::default()))),
+                (oon_id, safety_reason(Action::Drop(Default::default()))),
+            ]),
+        };
+        let hydrator = hydrator(client);
+        let candidates = vec![
+            PostCandidate {
+                tweet_id: parent_id,
+                in_network: Some(true),
+                ..Default::default()
+            },
+            PostCandidate {
+                tweet_id: reply_id,
+                in_network: Some(true),
+                ancestors: vec![parent_id],
+                ..Default::default()
+            },
+            PostCandidate {
+                tweet_id: oon_id,
+                in_network: Some(false),
+                ..Default::default()
+            },
+        ];
+
+        let hydrated = hydrate(&hydrator, &candidates).await;
+
+        assert_eq!(
+            hydrated[0].visibility_reason,
+            Some(safety_reason(Action::Interstitial)),
+            "in-network parent that is also a sibling reply ancestor must keep TimelineHome"
+        );
+        assert_eq!(
+            hydrated[1].visibility_reason,
+            Some(safety_reason(Action::Allow))
+        );
+        assert_eq!(
+            hydrated[1].drop_ancillary_posts,
+            Some(true),
+            "ancestor/quote ancillary checks still use TimelineHomeRecommendations"
+        );
+        assert_eq!(
+            hydrated[2].visibility_reason,
+            Some(safety_reason(Action::Drop(Default::default()))),
+            "true OON primary must use TimelineHomeRecommendations"
+        );
+    }
+
+    #[tokio::test]
+    async fn oon_primary_uses_recommendations_even_when_timeline_home_would_allow() {
+        let oon_id = 20;
+        let client = LevelAwareVfClient {
+            timeline_home: HashMap::from([(oon_id, safety_reason(Action::Allow))]),
+            recommendations: HashMap::from([(
+                oon_id,
+                safety_reason(Action::Drop(Default::default())),
+            )]),
+        };
+        let hydrator = hydrator(client);
+        let candidates = vec![PostCandidate {
+            tweet_id: oon_id,
+            in_network: Some(false),
+            ..Default::default()
+        }];
+
+        let hydrated = hydrate(&hydrator, &candidates).await;
+
+        assert_eq!(
+            hydrated[0].visibility_reason,
+            Some(safety_reason(Action::Drop(Default::default())))
+        );
     }
 }
