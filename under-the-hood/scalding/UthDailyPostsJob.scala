@@ -342,7 +342,7 @@ object UthDailyPostsApp {
     source: Option[String]
   ): ActionAgg = {
     val applyTs = if (isApply) eventMs else Long.MinValue
-    val applySrc = if (isApply) source else None
+    val applySrc = if (isApply) UthLabelSource.persistToken(source) else None
     (isApply, eventMs, isApply, expiresMs, applyTs, applySrc)
   }
 
@@ -421,7 +421,7 @@ object UthDailyPostsApp {
           val deadline = math.min(createdMs + observationMs, dayEndMs)
           val removed =
             if (removedAfterLastAction(lastApply, lastExpires, createdMs, deadline)) 1L else 0L
-          ((userId, day, label, source), (1L, removed))
+          ((userId, day, label, UthLabelSource.persistToken(source)), (1L, removed))
       }.group,
       config.reducers
     ).sum.toTypedPipe.map {

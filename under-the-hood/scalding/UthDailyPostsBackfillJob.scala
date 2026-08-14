@@ -299,7 +299,7 @@ object UthDailyPostsBackfillApp {
             if (UthDailyPostsApp
                 .removedAfterLastAction(lastApply, lastExpires, createdMs, deadline)) 1L
             else 0L
-          ((userId, day, label, source, asOfDay), (1L, removed))
+          ((userId, day, label, UthLabelSource.persistToken(source), asOfDay), (1L, removed))
       }.group,
       config.reducers
     ).sum.toTypedPipe.map {
