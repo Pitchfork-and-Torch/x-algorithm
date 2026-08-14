@@ -44,8 +44,8 @@ object UthLabelSource {
       case p: Product => p.productPrefix
       case _ => ""
     }
-    val cls = source.getClass
-    isGrokName(productName) || isGrokName(cls.getSimpleName) || isGrokName(cls.getName)
+    // getName + lastNonEmptySegment; skip getSimpleName (can throw on Scala $ names).
+    isGrokName(productName) || isGrokName(source.getClass.getName)
   }
 
   private def isGrokName(name: String): Boolean = {
