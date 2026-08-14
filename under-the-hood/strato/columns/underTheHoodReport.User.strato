@@ -155,7 +155,15 @@ def sumDayCounts(days: Option[Seq[UthDayCount]]): Long =
     acc + d.count.getOrElse(0L)
   }
 
-def postLabelSource(source: Option[String]): String =
+def bestDayRow(a: UthDayCarriedRemoved, b: UthDayCarriedRemoved): UthDayCarriedRemoved = {
+  val ac = a.carried.getOrElse(0L)
+  val ar = a.removed.getOrElse(0L)
+  val bc = b.carried.getOrElse(0L)
+  val br = b.removed.getOrElse(0L)
+  if (ac > bc || (ac == bc && ar >= br)) { a } else { b }
+}
+
+def postLabelSource(source: Option[String]): String = {
   source.map { s => s.trim.toLowerCase } match {
     case Some("automated") => "automated"
     case Some("manual") => "manual"
@@ -197,35 +205,32 @@ def buildReportJson(
     .getOrElse(Seq.empty)
     .flatMap { agg =>
       agg.label.filter(underTheHoodLabels.isPostLabel).map { raw =>
-        val posts = sumCarried(agg.days)
-        {
-          label = underTheHoodLabels.postLabelName(raw),
-          about = underTheHoodLabels.postLabelAbout(raw),
-          effect = underTheHoodLabels.postLabelEffect(raw),
-          source = postLabelSource(agg.source),
-          posts = posts,
-          totalPostsInMonth = postCount,
-          percentageOfPosts = formatPercentage(posts, postCount),
-        }
+        (underTheHoodLabels.postLabelName(raw), postLabelSource(agg.source), agg)
       }
     }
-    .groupBy { row => (row.label, row.source) }
+    .groupBy { t => (t._1, t._2) }
     .flatMap { g =>
-      val rows = g._2
-      rows.headOption.map { head =>
-        val posts = rows.foldLeft(0L) { (acc, r) =>
-          if (r.posts > acc) { r.posts } else { acc }
+      val name = g._1._1
+      val source = g._1._2
+      val days = g._2
+        .flatMap { t => t._3.days.getOrElse(Seq.empty) }
+        .groupBy { d => d.dayOfMonth.getOrElse(0) }
+        .flatMap { dg =>
+          dg._2.headOption.map { first =>
+            dg._2.foldLeft(first) { (best, d) => bestDayRow(best, d) }
+          }
         }
-        {
-          label = head.label,
-          about = head.about,
-          effect = head.effect,
-          source = head.source,
-          posts = posts,
-          totalPostsInMonth = postCount,
-          percentageOfPosts = formatPercentage(posts, postCount),
-        }
-      }
+        .toList
+      val posts = sumCarried(Some(days))
+      Some({
+        label = name,
+        about = underTheHoodLabels.postLabelAbout(name),
+        effect = underTheHoodLabels.postLabelEffect(name),
+        source = source,
+        posts = posts,
+        totalPostsInMonth = postCount,
+        percentageOfPosts = formatPercentage(posts, postCount),
+      })
     }
     .toList
     .sortBy { row => (row.label, row.source) }
