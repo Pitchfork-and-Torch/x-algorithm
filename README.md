@@ -109,8 +109,8 @@ Ranking sets the order. Whether a post can be shown at all is decided separately
 │  ┌────────────────────────────────────────────────────────────────────────────────────┐  │
 │  │ 5. SCORING                                                                         │  │
 │  │    <a href="home-mixer/scorers/phoenix_scorer.rs">PhoenixScorer</a>   a probability for each action the viewer might take             │  │
-│  │    <a href="home-mixer/scorers/ranking_scorer.rs">RankingScorer</a>   weighted sum, then author-size IPS, repeated-author             │  │
-│  │                    decay, an out-of-network discount, a new-author boost           │  │
+│  │    <a href="home-mixer/scorers/ranking_scorer.rs">RankingScorer</a>   weighted sum, then author-size IPS, origin-author            │  │
+│  │                    diversity decay, size-aware OON discount, new-author boost      │  │
 │  │    <a href="home-mixer/scorers/vm_ranker.rs">VMRanker</a>        calls the reranking service in <a href="vm-ranker/">vm-ranker/</a>                       │  │
 │  └────────────────────────────────────────────────────────────────────────────────────┘  │
 │                                            ▼                                             │
@@ -332,8 +332,8 @@ Positive actions carry positive weights, negative actions negative ones. The wei
 Four adjustments follow:
 
 - **Author-size IPS**: a batch-mean-normalized inverse-propensity multiplier on `ln(1 + followers)`. Equal Phoenix scores are not ranked by audience size. Quality still wins: the default clamp is 2x, so a large-author post that is 3x more relevant still ranks higher. Math: [`docs/MERITOCRATIC_AUTHOR_SIZE_IPS.md`](docs/MERITOCRATIC_AUTHOR_SIZE_IPS.md).
-- **Author Diversity**: each post after an author's first is multiplied by a decaying factor, down to a floor.
-- **Out-of-Network Discount**: posts from accounts the viewer does not follow are multiplied by a factor below 1, as are replies and reposts from accounts the viewer does follow.
+- **Author Diversity**: each post after an author's first is multiplied by a decaying factor, down to a floor. By default the decay key is the *content origin* (`retweeted_user_id` when present), so a viral original cannot flood the slate through many distinct retweeters.
+- **Out-of-Network Discount**: posts from accounts the viewer does not follow are multiplied by a factor below 1, as are replies and reposts from accounts the viewer does follow. Size-aware relief softens that tax for small authors (default: half relief below 1k followers, tapering to none by 100k) so discovery is not double-penalized by audience size and the follow graph. See [`docs/FEED_FAIRNESS.md`](docs/FEED_FAIRNESS.md).
 - **New-Author Boost**: posts from authors whose impressions are below a threshold are lifted toward a target position.
 
 `VMRanker` then calls [`vm-ranker/`](vm-ranker/), a separate service that reorders the result.
@@ -357,7 +357,7 @@ Four adjustments follow:
 | `PreviouslySeenPostsBackupFilter` | The same, from a second record of impressions                                                     |
 | `PreviouslyServedPostsFilter`     | Posts already served earlier in the session                                                       |
 | `MutedKeywordFilter`              | Posts matching the viewer's muted keywords                                                        |
-| `AuthorSocialgraphFilter`         | Posts from accounts the viewer blocks or mutes                                                    |
+| `AuthorSocialgraphFilter`         | Posts from accounts the viewer blocks or mutes, including quotes/reposts of muted or blocked authors |
 | `VideoFilter`                     | Video posts, when the request excludes video                                                      |
 | `TopicIdsFilter`                  | Posts outside the requested topics, and posts in excluded topics                                  |
 | `NewUserMinEngagementFilter`      | For new accounts, out-of-network posts below an engagement threshold                              |

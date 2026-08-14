@@ -36,10 +36,18 @@ impl Filter<ScoredPostsQuery, PostCandidate> for AuthorSocialgraphFilter {
                 .quoted_user_id
                 .map(|uid| viewer_blocked_user_ids.contains(&(uid as i64)))
                 .unwrap_or(false);
+            let viewer_mutes_quoted_author = candidate
+                .quoted_user_id
+                .map(|uid| viewer_muted_user_ids.contains(&(uid as i64)))
+                .unwrap_or(false);
 
             let viewer_blocks_retweeted_user = candidate
                 .retweeted_user_id
                 .map(|uid| viewer_blocked_user_ids.contains(&(uid as i64)))
+                .unwrap_or(false);
+            let viewer_mutes_retweeted_user = candidate
+                .retweeted_user_id
+                .map(|uid| viewer_muted_user_ids.contains(&(uid as i64)))
                 .unwrap_or(false);
 
             if muted
@@ -47,7 +55,9 @@ impl Filter<ScoredPostsQuery, PostCandidate> for AuthorSocialgraphFilter {
                 || author_blocks_viewer
                 || quoted_author_blocks_viewer
                 || viewer_blocks_quoted_author
+                || viewer_mutes_quoted_author
                 || viewer_blocks_retweeted_user
+                || viewer_mutes_retweeted_user
             {
                 removed.push(candidate);
             } else {
@@ -282,6 +292,78 @@ mod tests {
 
         assert_eq!(result.kept.len(), 0);
         assert_eq!(result.removed.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_muted_quoted_author_is_removed() {
+        let filter = AuthorSocialgraphFilter;
+        let user_features = UserFeatures {
+            muted_user_ids: vec![200],
+            ..Default::default()
+        };
+        let query = make_query_with_features(user_features);
+
+        let mut quote = make_candidate(1, 100);
+        quote.quoted_user_id = Some(200);
+
+        let candidates = vec![quote, make_candidate(3, 300)];
+        let result = filter.filter(&query, candidates);
+
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.kept[0].author_id, 300);
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].quoted_user_id, Some(200));
+    }
+
+    #[tokio::test]
+    async fn test_unmuted_quoted_author_is_kept() {
+        let filter = AuthorSocialgraphFilter;
+        let query = make_query_with_features(UserFeatures::default());
+
+        let mut quote = make_candidate(1, 100);
+        quote.quoted_user_id = Some(200);
+
+        let result = filter.filter(&query, vec![quote]);
+
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.kept[0].quoted_user_id, Some(200));
+        assert!(result.removed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_muted_retweeted_author_is_removed() {
+        let filter = AuthorSocialgraphFilter;
+        let user_features = UserFeatures {
+            muted_user_ids: vec![200],
+            ..Default::default()
+        };
+        let query = make_query_with_features(user_features);
+
+        let mut retweet = make_candidate(1, 100);
+        retweet.retweeted_user_id = Some(200);
+
+        let candidates = vec![retweet, make_candidate(3, 300)];
+        let result = filter.filter(&query, candidates);
+
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.kept[0].author_id, 300);
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].retweeted_user_id, Some(200));
+    }
+
+    #[tokio::test]
+    async fn test_unmuted_retweeted_author_is_kept() {
+        let filter = AuthorSocialgraphFilter;
+        let query = make_query_with_features(UserFeatures::default());
+
+        let mut retweet = make_candidate(1, 100);
+        retweet.retweeted_user_id = Some(200);
+
+        let result = filter.filter(&query, vec![retweet]);
+
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.kept[0].retweeted_user_id, Some(200));
+        assert!(result.removed.is_empty());
     }
 
     #[tokio::test]

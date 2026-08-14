@@ -41,7 +41,7 @@ A 100-follower post and a 1M-follower post that Phoenix scored equally (pairwise
 
 - Not demographic parity. There are no identity groups, no protected-class buckets, no guaranteed impression share by category.
 - Not "every account gets the same impressions." Low-quality posts stay low. Spam and predicted block/mute/report stay negative and are not boosted.
-- Not a replacement for retrieval. A post that never enters the candidate set cannot be residualized. SidTail (authors under 1k followers) and a SID `post_creation` window are the retrieval-side counterparts. They are not wired in this change.
+- Not a replacement for retrieval. A post that never enters the candidate set cannot be residualized. SidTail (authors under 1k followers) and a SID `post_creation` window are the retrieval-side counterparts. They are not wired in this change. Ranking-side companions (size-aware OON relief, origin-author diversity, mute symmetry) are in [`FEED_FAIRNESS.md`](FEED_FAIRNESS.md).
 - Not UserCred. PageRank is an enforcement prestige graph, not a For You weight. Do not add it as a rank feature.
 
 ## Knobs
