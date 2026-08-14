@@ -15,7 +15,7 @@ object UthLabelSource {
 
   /** Persist only automated | manual | llm. Unset/unmapped stay empty. */
   def persistToken(source: Option[String]): Option[String] =
-    source match {
+    source.map(_.trim.toLowerCase) match {
       case Some(Automated) => Some(Automated)
       case Some(Manual) => Some(Manual)
       case Some(Llm) => Some(Llm)

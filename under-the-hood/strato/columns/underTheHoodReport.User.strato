@@ -156,7 +156,7 @@ def sumDayCounts(days: Option[Seq[UthDayCount]]): Long =
   }
 
 def postLabelSource(source: Option[String]): String =
-  source match {
+  source.map { s => s.trim.toLowerCase } match {
     case Some("automated") => "automated"
     case Some("manual") => "manual"
     case Some("llm") => "llm"
