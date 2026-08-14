@@ -44,12 +44,19 @@ object UthLabelSource {
       case p: Product => p.productPrefix
       case _ => ""
     }
-    val typeName = source.getClass.getSimpleName
-    isGrokName(productName) || isGrokName(typeName)
+    val cls = source.getClass
+    isGrokName(productName) || isGrokName(cls.getSimpleName) || isGrokName(cls.getName)
   }
 
   private def isGrokName(name: String): Boolean = {
-    val simple = name.split('.').last.split('$').last
+    val afterDot = name.lastIndexOf('.') match {
+      case -1 => name
+      case i => name.substring(i + 1)
+    }
+    val simple = afterDot.lastIndexOf('$') match {
+      case -1 => afterDot
+      case i => afterDot.substring(i + 1)
+    }
     simple == "GrokAnnotationAction" || simple.startsWith("GrokAnnotation")
   }
 }
