@@ -170,6 +170,7 @@ def postLabelSource(source: Option[String]): String = {
     case Some("llm") => "llm"
     case _ => "unknown"
   }
+}
 
 def formatPercentage(numerator: Long, denominator: Long): String = {
   if (denominator <= 0L) {
@@ -205,14 +206,14 @@ def buildReportJson(
     .getOrElse(Seq.empty)
     .flatMap { agg =>
       agg.label.filter(underTheHoodLabels.isPostLabel).map { raw =>
-        (underTheHoodLabels.postLabelName(raw), postLabelSource(agg.source), agg)
+        (underTheHoodLabels.postLabelName(raw), postLabelSource(agg.source), raw, agg)
       }
     }
     .groupBy { t => (t._1, t._2) }
     .toList
     .flatMap { case ((name, source), rows) =>
       val days = rows
-        .flatMap { t => t._3.days.getOrElse(Seq.empty) }
+        .flatMap { case (_, _, _, agg) => agg.days.getOrElse(Seq.empty) }
         .groupBy { d => d.dayOfMonth.getOrElse(0) }
         .toList
         .flatMap { case (_, dayRows) =>
@@ -221,15 +222,17 @@ def buildReportJson(
           }
         }
       val posts = sumCarried(Some(days))
-      Some({
-        label = name,
-        about = underTheHoodLabels.postLabelAbout(name),
-        effect = underTheHoodLabels.postLabelEffect(name),
-        source = source,
-        posts = posts,
-        totalPostsInMonth = postCount,
-        percentageOfPosts = formatPercentage(posts, postCount),
-      })
+      rows.headOption.map { case (_, _, raw, _) =>
+        {
+          label = name,
+          about = underTheHoodLabels.postLabelAbout(raw),
+          effect = underTheHoodLabels.postLabelEffect(raw),
+          source = source,
+          posts = posts,
+          totalPostsInMonth = postCount,
+          percentageOfPosts = formatPercentage(posts, postCount),
+        }
+      }
     }
     .toList
     .sortBy { row => (row.label, row.source) }
