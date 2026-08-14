@@ -238,6 +238,30 @@ param!(
     0.25
 );
 param!(
+    EnableAuthorSizeIps,
+    bool,
+    "rust_home_mixer_enable_author_size_ips",
+    true
+);
+param!(
+    AuthorSizeIpsAlpha,
+    f64,
+    "rust_home_mixer_author_size_ips_alpha",
+    0.5
+);
+param!(
+    AuthorSizeIpsMaxBoost,
+    f64,
+    "rust_home_mixer_author_size_ips_max_boost",
+    2.0
+);
+param!(
+    EnableOriginAuthorDiversity,
+    bool,
+    "rust_home_mixer_enable_origin_author_diversity",
+    true
+);
+param!(
     LogSlateContext,
     bool,
     "rust_home_mixer_log_slate_context",
@@ -248,6 +272,30 @@ param!(
     f64,
     "rust_home_mixer_oon_weight_factor",
     0.75
+);
+param!(
+    EnableSizeAwareOonRelief,
+    bool,
+    "rust_home_mixer_enable_size_aware_oon_relief",
+    true
+);
+param!(
+    SizeAwareOonFollowerFloor,
+    i64,
+    "rust_home_mixer_size_aware_oon_follower_floor",
+    1000
+);
+param!(
+    SizeAwareOonFollowerCeiling,
+    i64,
+    "rust_home_mixer_size_aware_oon_follower_ceiling",
+    100000
+);
+param!(
+    SizeAwareOonRelief,
+    f64,
+    "rust_home_mixer_size_aware_oon_relief",
+    0.5
 );
 
 param!(

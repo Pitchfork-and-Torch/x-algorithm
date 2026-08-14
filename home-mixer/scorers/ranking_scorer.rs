@@ -1,7 +1,10 @@
-use crate::models::candidate::{MpnParts, PhoenixScores, PostCandidate, SlateContext};
+use crate::models::candidate::{
+    CandidateHelpers, MpnParts, PhoenixScores, PostCandidate, SlateContext,
+};
 use crate::models::query::ScoredPostsQuery;
 use crate::params::*;
 use crate::scorers::author_cold_start::AuthorColdStart;
+use crate::scorers::author_size_ips;
 use crate::scorers::value_model_gate::GateModel;
 use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
@@ -616,6 +619,7 @@ impl RankingScorer {
     }
 
     fn compute_slate_contexts(
+        query: &ScoredPostsQuery,
         candidates: &[PostCandidate],
         pre_diversity_scores: &[f64],
     ) -> Vec<SlateContext> {
@@ -626,12 +630,19 @@ impl RankingScorer {
             .collect();
         indexed.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(Ordering::Equal));
 
+        let use_origin = query.params.get(EnableOriginAuthorDiversity);
         let mut contexts = vec![SlateContext::default(); candidates.len()];
         let mut author_counts: FxHashMap<u64, u32> = FxHashMap::default();
         let mut last_author_rank: FxHashMap<u64, u32> = FxHashMap::default();
         for (rank, (idx, score)) in indexed.into_iter().enumerate() {
             let rank = rank as u32;
-            let author_id = candidates[idx].author_id;
+            // Count diversity against the content origin so a viral original
+            // cannot flood the slate via many distinct retweeters.
+            let author_id = if use_origin {
+                candidates[idx].get_original_author_id()
+            } else {
+                candidates[idx].author_id
+            };
             let k = author_counts.get(&author_id).copied().unwrap_or(0);
             let rank_gap = last_author_rank.get(&author_id).map(|last| rank - last);
             contexts[idx] = SlateContext {
@@ -698,6 +709,44 @@ impl RankingScorer {
             oon_weight_factor
         }
     }
+
+    /// Soften the flat OON tax for small authors.
+    ///
+    /// Nearly all discovery for accounts outside a viewer's follow graph is
+    /// OON. Stacking a flat 0.75 tax on top of audience-size leakage makes
+    /// equal Phoenix quality lose to large accounts twice. Relief interpolates
+    /// from `SizeAwareOonRelief` (followers <= floor) down to 0 (followers >=
+    /// ceiling): `oon' = base + (1 - base) * relief * t`.
+    fn oon_weight_for(query: &ScoredPostsQuery, candidate: &PostCandidate, base: f64) -> f64 {
+        if !query.params.get(EnableSizeAwareOonRelief) {
+            return base;
+        }
+        let Some(followers) = candidate.author_followers_count else {
+            return base;
+        };
+        let floor = query.params.get(SizeAwareOonFollowerFloor).max(0);
+        let ceiling = query.params.get(SizeAwareOonFollowerCeiling).max(floor + 1);
+        let relief = query.params.get(SizeAwareOonRelief).clamp(0.0, 1.0);
+        if !relief.is_finite() || relief <= 0.0 {
+            return base;
+        }
+
+        let followers = i64::from(followers.max(0));
+        let t = if followers <= floor {
+            1.0
+        } else if followers >= ceiling {
+            0.0
+        } else {
+            let span = (ceiling - floor) as f64;
+            1.0 - (followers - floor) as f64 / span
+        };
+        let adjusted = base + (1.0 - base) * relief * t;
+        if adjusted.is_finite() {
+            adjusted.clamp(base.min(1.0), 1.0)
+        } else {
+            base
+        }
+    }
 }
 
 #[async_trait]
@@ -738,6 +787,9 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
                 .collect()
         };
 
+        let ips_multipliers = author_size_ips::multipliers_for(query, candidates);
+        let size_adjusted_scores = author_size_ips::apply(query, candidates, &weighted_scores);
+
         let mpn_scoring = query.params.get(EnableMpnScoring) && !use_dwell_regret;
 
         let effective_oon = Self::effective_oon_weight(query);
@@ -757,7 +809,11 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
             let persisted_contexts: Option<Vec<SlateContext>> = if query.has_cached_posts {
                 Self::stored_slate_contexts(candidates)
             } else {
-                Some(Self::compute_slate_contexts(candidates, &weighted_scores))
+                Some(Self::compute_slate_contexts(
+                    query,
+                    candidates,
+                    &size_adjusted_scores,
+                ))
             };
 
             let diversity_multipliers: Vec<f64> = if enable_author_diversity {
@@ -765,8 +821,11 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
                 let scoring_contexts: &[SlateContext] = match &persisted_contexts {
                     Some(contexts) if !query.has_cached_posts => contexts,
                     _ => {
-                        recomputed_contexts =
-                            Self::compute_slate_contexts(candidates, &weighted_scores);
+                        recomputed_contexts = Self::compute_slate_contexts(
+                            query,
+                            candidates,
+                            &size_adjusted_scores,
+                        );
                         &recomputed_contexts
                     }
                 };
@@ -779,9 +838,9 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
                 .iter()
                 .enumerate()
                 .map(|(i, c)| {
-                    let mut m = diversity_multipliers[i];
+                    let mut m = diversity_multipliers[i] * ips_multipliers[i];
                     if oon_applies(c) {
-                        m *= effective_oon;
+                        m *= Self::oon_weight_for(query, c, effective_oon);
                     }
                     m
                 })
@@ -819,14 +878,18 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
                 .collect();
         }
 
-        let adjusted_scores = self
-            .author_cold_start
-            .apply(query, candidates, &weighted_scores);
+        let adjusted_scores =
+            self.author_cold_start
+                .apply(query, candidates, &size_adjusted_scores);
 
         let persisted_contexts: Option<Vec<SlateContext>> = if query.has_cached_posts {
             Self::stored_slate_contexts(candidates)
         } else {
-            Some(Self::compute_slate_contexts(candidates, &adjusted_scores))
+            Some(Self::compute_slate_contexts(
+                query,
+                candidates,
+                &adjusted_scores,
+            ))
         };
 
         let diversity_adjusted = if enable_author_diversity {
@@ -835,7 +898,7 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
                 Some(contexts) if !query.has_cached_posts => contexts,
                 _ => {
                     recomputed_contexts =
-                        Self::compute_slate_contexts(candidates, &adjusted_scores);
+                        Self::compute_slate_contexts(query, candidates, &adjusted_scores);
                     &recomputed_contexts
                 }
             };
@@ -850,7 +913,7 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
             .map(|(i, c)| {
                 let after_diversity = diversity_adjusted[i];
                 if oon_applies(c) {
-                    after_diversity * effective_oon
+                    after_diversity * Self::oon_weight_for(query, c, effective_oon)
                 } else {
                     after_diversity
                 }
@@ -1042,6 +1105,195 @@ mod tests {
         let oon_score = scored[1].as_ref().unwrap().score.unwrap();
 
         assert!((oon_score - in_network_score * 0.75).abs() < 1e-9);
+    }
+
+    fn candidate_with_followers(
+        author_id: u64,
+        in_network: Option<bool>,
+        followers: i32,
+    ) -> PostCandidate {
+        PostCandidate {
+            author_id,
+            in_network,
+            author_followers_count: Some(followers),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn applies_author_size_ips_to_equal_phoenix_scores() {
+        let scorer = test_scorer();
+        let candidates = vec![
+            candidate_with_followers(1, Some(true), 100),
+            candidate_with_followers(2, Some(true), 1_000_000),
+        ];
+        let query = query_with_flags(&[
+            ("rust_home_mixer_enable_author_size_ips", "true"),
+            ("rust_home_mixer_author_size_ips_alpha", "0.5"),
+            ("rust_home_mixer_enable_author_diversity", "false"),
+            ("rust_home_mixer_value_model_mode", "weighted"),
+            ("rust_home_mixer_enable_mpn_scoring", "false"),
+        ]);
+        let scored = scorer.score(&query, &candidates).await;
+        let small = scored[0].as_ref().unwrap().score.unwrap();
+        let large = scored[1].as_ref().unwrap().score.unwrap();
+        assert!(small > large, "small={small} large={large}");
+        let weighted_small = scored[0].as_ref().unwrap().weighted_score.unwrap();
+        let weighted_large = scored[1].as_ref().unwrap().weighted_score.unwrap();
+        assert!((weighted_small - weighted_large).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn author_size_ips_can_be_disabled() {
+        let scorer = test_scorer();
+        let candidates = vec![
+            candidate_with_followers(1, Some(true), 100),
+            candidate_with_followers(2, Some(true), 1_000_000),
+        ];
+        let query = query_with_flags(&[
+            ("rust_home_mixer_enable_author_size_ips", "false"),
+            ("rust_home_mixer_enable_author_diversity", "false"),
+            ("rust_home_mixer_value_model_mode", "weighted"),
+            ("rust_home_mixer_enable_mpn_scoring", "false"),
+        ]);
+        let scored = scorer.score(&query, &candidates).await;
+        let small = scored[0].as_ref().unwrap().score.unwrap();
+        let large = scored[1].as_ref().unwrap().score.unwrap();
+        assert!((small - large).abs() < 1e-9, "small={small} large={large}");
+    }
+
+    #[test]
+    fn size_aware_oon_softens_tax_for_small_authors() {
+        let query = query_with_flags(&[
+            ("rust_home_mixer_enable_size_aware_oon_relief", "true"),
+            ("rust_home_mixer_size_aware_oon_follower_floor", "1000"),
+            ("rust_home_mixer_size_aware_oon_follower_ceiling", "100000"),
+            ("rust_home_mixer_size_aware_oon_relief", "0.5"),
+            ("rust_home_mixer_oon_weight_factor", "0.75"),
+        ]);
+        let base = 0.75;
+        let small = candidate_with_followers(1, Some(false), 500);
+        let mid = candidate_with_followers(2, Some(false), 50_500);
+        let large = candidate_with_followers(3, Some(false), 500_000);
+        let missing = PostCandidate {
+            author_id: 4,
+            in_network: Some(false),
+            author_followers_count: None,
+            ..Default::default()
+        };
+
+        let small_w = RankingScorer::oon_weight_for(&query, &small, base);
+        let mid_w = RankingScorer::oon_weight_for(&query, &mid, base);
+        let large_w = RankingScorer::oon_weight_for(&query, &large, base);
+        let missing_w = RankingScorer::oon_weight_for(&query, &missing, base);
+
+        // floor: 0.75 + 0.25 * 0.5 * 1.0 = 0.875
+        assert!((small_w - 0.875).abs() < 1e-9, "{small_w}");
+        // midpoint of [1000, 100000]: t = 0.5 → 0.75 + 0.25 * 0.5 * 0.5 = 0.8125
+        assert!((mid_w - 0.8125).abs() < 1e-9, "{mid_w}");
+        assert!((large_w - base).abs() < 1e-9, "{large_w}");
+        assert!((missing_w - base).abs() < 1e-9, "{missing_w}");
+        assert!(small_w > mid_w && mid_w > large_w);
+    }
+
+    #[tokio::test]
+    async fn size_aware_oon_lifts_small_oon_relative_to_large_oon() {
+        let scorer = test_scorer();
+        let candidates = vec![
+            candidate_with_followers(1, Some(false), 100),
+            candidate_with_followers(2, Some(false), 1_000_000),
+        ];
+        let query = query_with_flags(&[
+            ("rust_home_mixer_enable_author_size_ips", "false"),
+            ("rust_home_mixer_enable_author_diversity", "false"),
+            ("rust_home_mixer_enable_size_aware_oon_relief", "true"),
+            ("rust_home_mixer_size_aware_oon_relief", "0.5"),
+            ("rust_home_mixer_oon_weight_factor", "0.75"),
+            ("rust_home_mixer_value_model_mode", "weighted"),
+            ("rust_home_mixer_enable_mpn_scoring", "false"),
+        ]);
+        let scored = scorer.score(&query, &candidates).await;
+        let small = scored[0].as_ref().unwrap().score.unwrap();
+        let large = scored[1].as_ref().unwrap().score.unwrap();
+        assert!(small > large, "small={small} large={large}");
+    }
+
+    #[tokio::test]
+    async fn origin_author_diversity_decays_retweets_of_same_original() {
+        let scorer = test_scorer();
+        let first = PostCandidate {
+            tweet_id: 10,
+            author_id: 100,
+            retweeted_user_id: Some(999),
+            retweeted_tweet_id: Some(1),
+            in_network: Some(true),
+            ..Default::default()
+        };
+        let second = PostCandidate {
+            tweet_id: 11,
+            author_id: 200,
+            retweeted_user_id: Some(999),
+            retweeted_tweet_id: Some(1),
+            in_network: Some(true),
+            ..Default::default()
+        };
+        let other = candidate(300, Some(true));
+
+        let query = query_with_flags(&[
+            ("rust_home_mixer_enable_author_diversity", "true"),
+            ("rust_home_mixer_enable_origin_author_diversity", "true"),
+            ("rust_home_mixer_author_diversity_decay", "0.5"),
+            ("rust_home_mixer_author_diversity_floor", "0.25"),
+            ("rust_home_mixer_enable_author_size_ips", "false"),
+            ("rust_home_mixer_enable_oon_rescore_for_in_network_replies_retweets", "false"),
+            ("rust_home_mixer_value_model_mode", "weighted"),
+            ("rust_home_mixer_enable_mpn_scoring", "false"),
+        ]);
+        let scored = scorer.score(&query, &[first, second, other]).await;
+        let a = scored[0].as_ref().unwrap().score.unwrap();
+        let b = scored[1].as_ref().unwrap().score.unwrap();
+        let c = scored[2].as_ref().unwrap().score.unwrap();
+        let expected = RankingScorer::diversity_multiplier(0.5, 0.25, 1.0);
+        // first RT and unrelated author share top score; second RT of same origin decays
+        assert!((a - c).abs() < 1e-9, "a={a} c={c}");
+        assert!((b - a * expected).abs() < 1e-9, "b={b} expected={}", a * expected);
+    }
+
+    #[tokio::test]
+    async fn origin_author_diversity_can_be_disabled() {
+        let scorer = test_scorer();
+        let first = PostCandidate {
+            tweet_id: 10,
+            author_id: 100,
+            retweeted_user_id: Some(999),
+            retweeted_tweet_id: Some(1),
+            in_network: Some(true),
+            ..Default::default()
+        };
+        let second = PostCandidate {
+            tweet_id: 11,
+            author_id: 200,
+            retweeted_user_id: Some(999),
+            retweeted_tweet_id: Some(1),
+            in_network: Some(true),
+            ..Default::default()
+        };
+
+        let query = query_with_flags(&[
+            ("rust_home_mixer_enable_author_diversity", "true"),
+            ("rust_home_mixer_enable_origin_author_diversity", "false"),
+            ("rust_home_mixer_author_diversity_decay", "0.5"),
+            ("rust_home_mixer_author_diversity_floor", "0.25"),
+            ("rust_home_mixer_enable_author_size_ips", "false"),
+            ("rust_home_mixer_enable_oon_rescore_for_in_network_replies_retweets", "false"),
+            ("rust_home_mixer_value_model_mode", "weighted"),
+            ("rust_home_mixer_enable_mpn_scoring", "false"),
+        ]);
+        let scored = scorer.score(&query, &[first, second]).await;
+        let a = scored[0].as_ref().unwrap().score.unwrap();
+        let b = scored[1].as_ref().unwrap().score.unwrap();
+        // Distinct retweeters: without origin diversity both keep full score.
+        assert!((a - b).abs() < 1e-9, "a={a} b={b}");
     }
 
     #[test]
