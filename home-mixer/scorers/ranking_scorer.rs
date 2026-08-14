@@ -2,6 +2,7 @@ use crate::models::candidate::{MpnParts, PhoenixScores, PostCandidate, SlateCont
 use crate::models::query::ScoredPostsQuery;
 use crate::params::*;
 use crate::scorers::author_cold_start::AuthorColdStart;
+use crate::scorers::author_size_ips;
 use crate::scorers::value_model_gate::GateModel;
 use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
@@ -738,6 +739,9 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
                 .collect()
         };
 
+        let ips_multipliers = author_size_ips::multipliers_for(query, candidates);
+        let size_adjusted_scores = author_size_ips::apply(query, candidates, &weighted_scores);
+
         let mpn_scoring = query.params.get(EnableMpnScoring) && !use_dwell_regret;
 
         let effective_oon = Self::effective_oon_weight(query);
@@ -757,7 +761,10 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
             let persisted_contexts: Option<Vec<SlateContext>> = if query.has_cached_posts {
                 Self::stored_slate_contexts(candidates)
             } else {
-                Some(Self::compute_slate_contexts(candidates, &weighted_scores))
+                Some(Self::compute_slate_contexts(
+                    candidates,
+                    &size_adjusted_scores,
+                ))
             };
 
             let diversity_multipliers: Vec<f64> = if enable_author_diversity {
@@ -766,7 +773,7 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
                     Some(contexts) if !query.has_cached_posts => contexts,
                     _ => {
                         recomputed_contexts =
-                            Self::compute_slate_contexts(candidates, &weighted_scores);
+                            Self::compute_slate_contexts(candidates, &size_adjusted_scores);
                         &recomputed_contexts
                     }
                 };
@@ -779,7 +786,7 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
                 .iter()
                 .enumerate()
                 .map(|(i, c)| {
-                    let mut m = diversity_multipliers[i];
+                    let mut m = diversity_multipliers[i] * ips_multipliers[i];
                     if oon_applies(c) {
                         m *= effective_oon;
                     }
@@ -819,9 +826,9 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
                 .collect();
         }
 
-        let adjusted_scores = self
-            .author_cold_start
-            .apply(query, candidates, &weighted_scores);
+        let adjusted_scores =
+            self.author_cold_start
+                .apply(query, candidates, &size_adjusted_scores);
 
         let persisted_contexts: Option<Vec<SlateContext>> = if query.has_cached_posts {
             Self::stored_slate_contexts(candidates)
@@ -1042,6 +1049,61 @@ mod tests {
         let oon_score = scored[1].as_ref().unwrap().score.unwrap();
 
         assert!((oon_score - in_network_score * 0.75).abs() < 1e-9);
+    }
+
+    fn candidate_with_followers(
+        author_id: u64,
+        in_network: Option<bool>,
+        followers: i32,
+    ) -> PostCandidate {
+        PostCandidate {
+            author_id,
+            in_network,
+            author_followers_count: Some(followers),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn applies_author_size_ips_to_equal_phoenix_scores() {
+        let scorer = test_scorer();
+        let candidates = vec![
+            candidate_with_followers(1, Some(true), 100),
+            candidate_with_followers(2, Some(true), 1_000_000),
+        ];
+        let query = query_with_flags(&[
+            ("rust_home_mixer_enable_author_size_ips", "true"),
+            ("rust_home_mixer_author_size_ips_alpha", "0.5"),
+            ("rust_home_mixer_enable_author_diversity", "false"),
+            ("rust_home_mixer_value_model_mode", "weighted"),
+            ("rust_home_mixer_enable_mpn_scoring", "false"),
+        ]);
+        let scored = scorer.score(&query, &candidates).await;
+        let small = scored[0].as_ref().unwrap().score.unwrap();
+        let large = scored[1].as_ref().unwrap().score.unwrap();
+        assert!(small > large, "small={small} large={large}");
+        let weighted_small = scored[0].as_ref().unwrap().weighted_score.unwrap();
+        let weighted_large = scored[1].as_ref().unwrap().weighted_score.unwrap();
+        assert!((weighted_small - weighted_large).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn author_size_ips_can_be_disabled() {
+        let scorer = test_scorer();
+        let candidates = vec![
+            candidate_with_followers(1, Some(true), 100),
+            candidate_with_followers(2, Some(true), 1_000_000),
+        ];
+        let query = query_with_flags(&[
+            ("rust_home_mixer_enable_author_size_ips", "false"),
+            ("rust_home_mixer_enable_author_diversity", "false"),
+            ("rust_home_mixer_value_model_mode", "weighted"),
+            ("rust_home_mixer_enable_mpn_scoring", "false"),
+        ]);
+        let scored = scorer.score(&query, &candidates).await;
+        let small = scored[0].as_ref().unwrap().score.unwrap();
+        let large = scored[1].as_ref().unwrap().score.unwrap();
+        assert!((small - large).abs() < 1e-9, "small={small} large={large}");
     }
 
     #[test]
