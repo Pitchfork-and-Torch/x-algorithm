@@ -49,14 +49,21 @@ object UthLabelSource {
   }
 
   private def isGrokName(name: String): Boolean = {
-    val afterDot = name.lastIndexOf('.') match {
-      case -1 => name
-      case i => name.substring(i + 1)
-    }
-    val simple = afterDot.lastIndexOf('$') match {
-      case -1 => afterDot
-      case i => afterDot.substring(i + 1)
-    }
+    val simple = lastNonEmptySegment(name)
     simple == "GrokAnnotationAction" || simple.startsWith("GrokAnnotation")
+  }
+
+  // Last `.` / `$` segment, skipping a trailing synthetic `$` (Scala module suffix).
+  // Do not String.split("$"): `$` is regex end-of-string.
+  private def lastNonEmptySegment(name: String): String = {
+    var end = name.length
+    while (end > 0 && (name.charAt(end - 1) == '.' || name.charAt(end - 1) == '$')) {
+      end -= 1
+    }
+    if (end == 0) ""
+    else {
+      val start = name.lastIndexOf('.', end - 1).max(name.lastIndexOf('$', end - 1))
+      name.substring(start + 1, end)
+    }
   }
 }
