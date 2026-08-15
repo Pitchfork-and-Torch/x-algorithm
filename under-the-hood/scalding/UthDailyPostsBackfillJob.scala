@@ -206,11 +206,11 @@ object UthDailyPostsBackfillApp {
           if (expiresStr == null || expiresStr.isEmpty) Long.MaxValue else expiresStr.toLong
         if (expires <= rangeLookbackStartMs) None
         else if (createdStr == null || createdStr.isEmpty)
-          Some((tweetId, (labelName, Long.MinValue, true, expires, None)))
+          Some((tweetId, (labelName, Long.MinValue, true, expires, None, true)))
         else {
           val created = createdStr.toLong
           if (created < rangeEndMs)
-            Some((tweetId, (labelName, created, true, expires, None)))
+            Some((tweetId, (labelName, created, true, expires, None, true)))
           else None
         }
     }
@@ -266,7 +266,7 @@ object UthDailyPostsBackfillApp {
     val inHorizon = joined.flatMap {
       case (
             _,
-            ((label, eventMs, isApply, expiresMs, source), (logicalId, userId, day, createdMs))
+            ((label, eventMs, isApply, expiresMs, source, isSnapshot), (logicalId, userId, day, createdMs))
           ) =>
         asOfDayStartsFor(createdMs, rangeStartMs, rangeEndMs, observationMs).flatMap { dStartMs =>
           val dayEndMs = dStartMs + DayMs
@@ -279,7 +279,7 @@ object UthDailyPostsBackfillApp {
               .map { _ =>
                 (
                   (logicalId, userId, day, label, yyyymmdd(dStartMs), createdMs),
-                  UthDailyPostsApp.actionAggFromEvent(isApply, eventMs, expiresMs, source)
+                  UthDailyPostsApp.actionAggFromEvent(isApply, eventMs, expiresMs, source, isSnapshot)
                 )
               }
         }
@@ -293,7 +293,7 @@ object UthDailyPostsBackfillApp {
       reduced.collect {
         case (
               (_, userId, day, label, asOfDay, createdMs),
-              (everApply, _, lastApply, lastExpires, _, source)
+              (everApply, _, lastApply, lastExpires, _, source, _)
             ) if everApply =>
           val deadline = math.min(createdMs + observationMs, yyyymmddToMs(asOfDay) + DayMs)
           val removed =
