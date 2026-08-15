@@ -111,7 +111,20 @@ impl PostStore {
 
     pub fn mark_as_deleted(&self, posts: Vec<TweetDeleteEvent>) {
         for post in posts.into_iter() {
-            self.posts.remove(&post.post_id);
+            // CompactPost carries author_id; TweetDeleteEvent does not.
+            // Strip the id from the author's deques before it can occupy the
+            // newest MAX_TINY_POSTS_PER_USER_SCAN window as a dead lookup.
+            let author_id = self
+                .posts
+                .remove(&post.post_id)
+                .map(|(_, compact)| compact.author_id);
+
+            if let Some(author_id) = author_id {
+                if author_id != DELETE_EVENT_KEY {
+                    self.remove_id_from_author_deques(author_id, post.post_id);
+                }
+            }
+
             self.deleted_posts.insert(post.post_id, true);
 
             let mut user_posts_entry = self
@@ -122,6 +135,18 @@ impl PostStore {
                 post_id: post.post_id,
                 created_at: post.deleted_at, 
             });
+        }
+    }
+
+    fn remove_id_from_author_deques(&self, author_id: i64, post_id: i64) {
+        for map in [
+            &self.original_posts_by_user,
+            &self.secondary_posts_by_user,
+            &self.video_posts_by_user,
+        ] {
+            if let Some(mut deque) = map.get_mut(&author_id) {
+                deque.retain(|tiny| tiny.post_id != post_id);
+            }
         }
     }
 
@@ -876,5 +901,123 @@ mod tests {
         assert!(!post_ids.contains(&1_003)); 
         assert!(!post_ids.contains(&1_005)); 
         assert!(!post_ids.contains(&1_006)); 
+    }
+
+    fn light_post(
+        post_id: i64,
+        author_id: i64,
+        created_at: i64,
+        is_reply: bool,
+        has_video: bool,
+    ) -> LightPost {
+        LightPost {
+            post_id,
+            author_id,
+            created_at,
+            in_reply_to_post_id: if is_reply { Some(1) } else { None },
+            in_reply_to_user_id: if is_reply { Some(2) } else { None },
+            is_retweet: false,
+            is_reply,
+            source_post_id: None,
+            source_user_id: None,
+            has_video,
+            conversation_id: None,
+        }
+    }
+
+    #[test]
+    fn mark_as_deleted_does_not_starve_newest_scan_window() {
+        let store = PostStore::new(2 * 24 * 60 * 60, 0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let author = 42_i64;
+        let live = 100_i64;
+        let deleted = MAX_TINY_POSTS_PER_USER_SCAN as i64;
+        let total = live + deleted;
+
+        let mut posts = Vec::with_capacity(total as usize);
+        for i in 1..=total {
+            posts.push(light_post(i, author, now - (total - i + 1), false, true));
+        }
+        store.insert_posts(posts);
+
+        let deletes: Vec<TweetDeleteEvent> = ((live + 1)..=total)
+            .map(|post_id| TweetDeleteEvent {
+                post_id,
+                deleted_at: now,
+            })
+            .collect();
+        store.mark_as_deleted(deletes);
+
+        let originals = store.original_posts_by_user.get(&author).unwrap();
+        assert_eq!(originals.len(), live as usize);
+        assert!(originals.iter().all(|p| p.post_id <= live));
+
+        let videos = store.video_posts_by_user.get(&author).unwrap();
+        assert_eq!(videos.len(), live as usize);
+        assert!(videos.iter().all(|p| p.post_id <= live));
+
+        assert!(store.posts.contains_key(&1));
+        assert!(store.posts.contains_key(&live));
+        assert!(!store.posts.contains_key(&(live + 1)));
+        assert!(store.deleted_posts.contains_key(&(live + 1)));
+        assert!(store
+            .original_posts_by_user
+            .get(&DELETE_EVENT_KEY)
+            .is_some_and(|d| d.len() == deleted as usize));
+
+        let served = store.get_all_posts_by_users(&[author], &HashSet::new(), Instant::now(), 1);
+        assert_eq!(served.len(), MAX_ORIGINAL_POSTS_PER_AUTHOR);
+        assert!(served.iter().all(|p| p.post_id <= live));
+        assert!(served.iter().any(|p| p.post_id == live));
+
+        let served_videos =
+            store.get_videos_by_users(&[author], &HashSet::new(), Instant::now(), 1);
+        assert_eq!(served_videos.len(), MAX_VIDEO_POSTS_PER_AUTHOR);
+        assert!(served_videos.iter().all(|p| p.post_id <= live));
+    }
+
+    #[test]
+    fn mark_as_deleted_strips_secondary_and_tombstones_unknown() {
+        let store = PostStore::new(2 * 24 * 60 * 60, 0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let author = 7_i64;
+        store.insert_posts(vec![
+            light_post(10, author, now - 3, true, false),
+            light_post(11, author, now - 2, true, false),
+        ]);
+        store.mark_as_deleted(vec![TweetDeleteEvent {
+            post_id: 11,
+            deleted_at: now,
+        }]);
+
+        let secondary = store.secondary_posts_by_user.get(&author).unwrap();
+        assert_eq!(secondary.len(), 1);
+        assert_eq!(secondary[0].post_id, 10);
+        assert!(!store.posts.contains_key(&11));
+        assert!(store.posts.contains_key(&10));
+
+        store.mark_as_deleted(vec![TweetDeleteEvent {
+            post_id: 99_999,
+            deleted_at: now,
+        }]);
+        assert!(store.deleted_posts.contains_key(&99_999));
+        assert!(store
+            .original_posts_by_user
+            .get(&DELETE_EVENT_KEY)
+            .is_some_and(|d| d.iter().any(|p| p.post_id == 99_999)));
+
+        store.insert_posts(vec![light_post(11, author, now - 1, true, false)]);
+        assert!(
+            !store.posts.contains_key(&11),
+            "DELETE_EVENT_KEY / deleted_posts tombstone must still skip a later insert"
+        );
     }
 }
