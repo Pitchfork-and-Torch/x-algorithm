@@ -264,6 +264,29 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn expired_proto_label_allows() {
+        let proto = xai_visibility_filtering_proto::SafetyLabelMap {
+            labels: HashMap::from([(
+                i32::from(SafetyLabelType::SPAM_HIGH_RECALL),
+                xai_visibility_filtering_proto::SafetyLabel {
+                    expires_at_msec: Some(1),
+                    ..Default::default()
+                },
+            )]),
+        };
+        let c = HydratedTweetCandidate {
+            tweet_id: 1,
+            author_id: 100,
+            safety_labels: SafetyLabelMap::from_proto_label_types(&proto),
+            ..Default::default()
+        };
+        assert!(matches!(
+            SPAM_HIGH_RECALL_DROP.evaluate(&crate::rules::test_context(&viewer(), &c)),
+            VfAction::Allow
+        ));
+    }
+
     fn follower_viewer() -> ViewerFeatures {
         ViewerFeatures {
             viewer: Viewer::LoggedIn(999),
