@@ -29,15 +29,17 @@ impl ManhattanAllowlist {
         }
     }
 
-    pub async fn get(&self, user_id: i64) -> Option<AllowlistRecord> {
-        let (entry, ttl_secs) = self.get_entity(EntityType::User, user_id).await?;
-        Some(AllowlistRecord {
-            user_id,
-            added_by: entry.added_by,
-            reason: entry.reason,
-            added_at: entry.added_at,
-            ttl_secs,
-        })
+    pub async fn get(&self, user_id: i64) -> anyhow::Result<Option<AllowlistRecord>> {
+        Ok(self
+            .get_entity(EntityType::User, user_id)
+            .await?
+            .map(|(entry, ttl_secs)| AllowlistRecord {
+                user_id,
+                added_by: entry.added_by,
+                reason: entry.reason,
+                added_at: entry.added_at,
+                ttl_secs,
+            }))
     }
 
     pub async fn add(
@@ -54,30 +56,41 @@ impl ManhattanAllowlist {
         self.remove_entity(EntityType::User, user_id).await
     }
 
+    /// Looks up an allowlist entry. `Ok(None)` means the store confirmed the
+    /// entity is absent. A store or decode failure is returned as `Err` so
+    /// callers can distinguish "not allowlisted" from "could not check", and
+    /// never treat an unreadable entry as not allowlisted.
     pub async fn get_entity(
         &self,
         entity_type: EntityType,
         entity_id: i64,
-    ) -> Option<(AllowlistEntry, i64)> {
+    ) -> anyhow::Result<Option<(AllowlistEntry, i64)>> {
         let lkey = Self::entity_lkey(entity_type, entity_id);
         let item = match self
             .client
             .get(self.tenant.clone(), [MH_PKEY], [lkey.as_str()])
             .await
         {
-            Ok(v) => v?,
+            Ok(Some(item)) => item,
+            Ok(None) => return Ok(None),
             Err(e) => {
-                warn!("Manhattan allowlist GET failed: {e}");
+                warn!("Manhattan allowlist GET failed for {lkey}: {e}");
                 crate::metrics::MANHATTAN_ERRORS_TOTAL.inc();
-                return None;
+                return Err(anyhow::anyhow!(
+                    "Manhattan allowlist GET failed for {lkey}: {e}"
+                ));
             }
         };
-        let entry: AllowlistEntry = serde_json::from_slice(item.value().as_bytes()).ok()?;
+        let entry: AllowlistEntry =
+            serde_json::from_slice(item.value().as_bytes()).map_err(|e| {
+                warn!("Manhattan allowlist entry decode failed for {lkey}: {e}");
+                anyhow::anyhow!("Manhattan allowlist entry decode failed for {lkey}: {e}")
+            })?;
         let ttl_secs = crate::manhattan::remaining_ttl_secs(
             item.expires_at()
                 .map(|d| d.timestamp_nanos_opt().unwrap_or(0) as u64),
         );
-        Some((entry, ttl_secs))
+        Ok(Some((entry, ttl_secs)))
     }
 
     pub async fn add_entity(
