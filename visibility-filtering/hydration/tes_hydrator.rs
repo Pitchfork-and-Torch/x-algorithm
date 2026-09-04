@@ -28,6 +28,18 @@ pub(crate) struct TweetHydration {
     pub(crate) media: TweetHydrationBatch<MediaFeature>,
 }
 
+impl TweetHydration {
+    /// True when a Drop-sunk TES flag RPC failed. NotFound (tweet is not
+    /// NSFW / not nullcast / no takedown) is not failure.
+    pub(crate) fn safety_critical_failed(&self, id: &TweetId) -> bool {
+        self.nullcast.is_failed(id)
+            || self.nsfw_user.is_failed(id)
+            || self.nsfw_admin.is_failed(id)
+            || self.takedown_reasons.is_failed(id)
+            || self.media.is_failed(id)
+    }
+}
+
 impl TesHydrator {
     pub async fn fetch_pure_core(
         &self,
@@ -242,6 +254,23 @@ mod tests {
         )
     }
 
+    fn rpc_failed<V>(id: u64) -> TweetHydrationBatch<V> {
+        TweetHydrationBatch::from_results(
+            [TweetId(id)],
+            HashMap::from([(
+                TweetId(id),
+                Err::<Option<V>, _>("tes timeout"),
+            )]),
+        )
+    }
+
+    fn not_found<V>(id: u64) -> TweetHydrationBatch<V> {
+        TweetHydrationBatch::from_results(
+            [TweetId(id)],
+            HashMap::from([(TweetId(id), Ok::<Option<V>, anyhow::Error>(None))]),
+        )
+    }
+
     fn candidate(tweet_id: u64, author_id: u64) -> TweetCandidateInput {
         let core = HashMap::from([(
             TweetId(tweet_id),
@@ -452,5 +481,42 @@ mod tests {
         let f = &features[&TweetId(10)];
         assert!(f.core.text.is_empty());
         assert!(!f.media.has_media);
+    }
+
+    #[test]
+    fn tes_nsfw_flag_rpc_failure_is_safety_critical() {
+        let keyed = TweetHydration {
+            nsfw_user: rpc_failed(10),
+            ..Default::default()
+        };
+        assert!(keyed.safety_critical_failed(&TweetId(10)));
+        assert!(!keyed.safety_critical_failed(&TweetId(11)));
+    }
+
+    #[test]
+    fn tes_nsfw_flag_not_found_is_not_safety_critical() {
+        let keyed = TweetHydration {
+            nsfw_user: not_found(10),
+            nsfw_admin: not_found(10),
+            nullcast: not_found(10),
+            ..Default::default()
+        };
+        assert!(!keyed.safety_critical_failed(&TweetId(10)));
+    }
+
+    #[test]
+    fn tes_nsfw_flag_rpc_failure_still_assembles_false_bits() {
+        let candidates = vec![candidate(10, 100)];
+        let core_datas = HashMap::from([(TweetId(10), PureCoreData {
+            author_id: 100,
+            ..Default::default()
+        })]);
+        let keyed = TweetHydration {
+            nsfw_user: rpc_failed(10),
+            ..Default::default()
+        };
+        let features = hydrator().assemble_tweet_features(&candidates, &core_datas, &keyed);
+        assert!(!features[&TweetId(10)].nsfw.user);
+        assert!(keyed.safety_critical_failed(&TweetId(10)));
     }
 }
