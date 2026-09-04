@@ -342,8 +342,9 @@ Positive actions carry positive weights, negative actions negative ones. The wei
 
 There is a common misconception to be aware of about the weights: they scale the predicted probabilities (or predicted continuous values, e.g. dwell time) — they do *not* scale the raw engagement counts, so e.g. it'd be incorrect to see that a report has 468 times higher weight than a like and conclude that e.g. "1 report cancels out 468 likes". The weights are a multiple on your own predicted probability of Liking, Reporting, etc, which is substantially driven by your own behavior.
 
-Three adjustments follow:
+Four adjustments follow:
 
+- **Author-size IPS**: a batch-mean-normalized inverse-propensity multiplier on `ln(1 + followers)`. Equal Phoenix scores are not ranked by audience size. Quality still wins: the default clamp is 2x, so a large-author post that is 3x more relevant still ranks higher. Math: [`docs/MERITOCRATIC_AUTHOR_SIZE_IPS.md`](docs/MERITOCRATIC_AUTHOR_SIZE_IPS.md).
 - **Author Diversity**: each post after an author's first is multiplied by a decaying factor, down to a floor.
 - **Out-of-Network Discount**: posts from accounts the viewer does not follow are multiplied by a factor below 1, as are replies and reposts from accounts the viewer does follow.
 - **New-Author Boost**: posts from authors whose impressions are below a threshold are lifted toward a target position.
