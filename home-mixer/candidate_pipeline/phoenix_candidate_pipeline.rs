@@ -2,6 +2,7 @@ use crate::candidate_hydrators::ads_brand_safety_vf_hydrator::AdsBrandSafetyVfHy
 use crate::candidate_hydrators::ai_trend_feedback_context_hydrator::AiTrendFeedbackContextHydrator;
 use crate::candidate_hydrators::bidirectional_follow_hydrator::BidirectionalFollowHydrator;
 use crate::candidate_hydrators::blocked_by_hydrator::BlockedByHydrator;
+use crate::candidate_hydrators::conversation_gap_ancestor_hydrator::ConversationGapAncestorHydrator;
 use crate::candidate_hydrators::core_data_candidate_hydrator::CoreDataCandidateHydrator;
 use crate::candidate_hydrators::engagement_counts_hydrator::EngagementCountsHydrator;
 use crate::candidate_hydrators::filtered_topics_hydrator::FilteredTopicsHydrator;
@@ -330,6 +331,7 @@ impl PhoenixCandidatePipeline {
                 socialgraph_client: socialgraph_client.clone(),
             }),
             Box::new(core_data_hydrator),
+            Box::new(ConversationGapAncestorHydrator::new(tes_client.clone())),
             Box::new(QuoteHydrator::new(tes_client.clone(), socialgraph_client.clone()).await),
             Box::new(MediaInfoHydrator::new(media_info_cache_client).await),
             Box::new(SubscriptionHydrator::new(tes_client.clone()).await),

@@ -182,3 +182,39 @@ fn should_drop_reason(reason: &FilteredReason) -> bool {
         _ => true, 
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xai_visibility_filtering::models::SafetyResult;
+
+    fn drop_reason() -> FilteredReason {
+        FilteredReason::SafetyResult(SafetyResult {
+            action: Action::Drop(Default::default()),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn skipped_conversation_ancestor_does_not_drop_until_gap_expanded() {
+        let drop = drop_reason();
+        let vf_results = HashMap::from([(
+            15u64,
+            Ok(Some(drop.clone())) as Result<Option<FilteredReason>>,
+        )]);
+
+        let thunder_only = PostCandidate {
+            tweet_id: 30,
+            ancestors: vec![20, 10],
+            ..Default::default()
+        };
+        assert!(!should_drop_ancillary(&thunder_only, &vf_results));
+
+        let expanded = PostCandidate {
+            tweet_id: 30,
+            ancestors: vec![20, 15, 10],
+            ..Default::default()
+        };
+        assert!(should_drop_ancillary(&expanded, &vf_results));
+    }
+}
