@@ -23,31 +23,32 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for QuotedPostTextHydrator {
         _query: &ScoredPostsQuery,
         candidates: &[PostCandidate],
     ) -> Vec<Result<PostCandidate, String>> {
-        let quoted_ids: Vec<u64> = candidates
+        let fetch_ids: Vec<u64> = candidates
             .iter()
-            .filter_map(|c| c.quoted_tweet_id)
+            .flat_map(|c| c.quoted_tweet_id.into_iter().chain(c.ancestors.iter().copied()))
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
 
-        let quoted_core = if quoted_ids.is_empty() {
+        let core = if fetch_ids.is_empty() {
             HashMap::new()
         } else {
-            self.tes_client.get_tweet_core_datas(quoted_ids).await
+            self.tes_client.get_tweet_core_datas(fetch_ids).await
         };
 
         candidates
             .iter()
             .map(|candidate| {
                 Ok(PostCandidate {
-                    quoted_tweet_text: candidate.quoted_tweet_id.and_then(|id| {
-                        match quoted_core.get(&id) {
-                            Some(Ok(Some(data))) if !data.text.is_empty() => {
-                                Some(data.text.clone())
-                            }
-                            _ => None,
-                        }
-                    }),
+                    quoted_tweet_text: candidate
+                        .quoted_tweet_id
+                        .and_then(|id| text_from_core(&core, id)),
+                    ancestor_texts: candidate
+                        .ancestors
+                        .iter()
+                        .copied()
+                        .filter_map(|id| text_from_core(&core, id).map(|text| (id, text)))
+                        .collect(),
                     ..Default::default()
                 })
             })
@@ -56,6 +57,17 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for QuotedPostTextHydrator {
 
     fn update(&self, candidate: &mut PostCandidate, hydrated: PostCandidate) {
         candidate.quoted_tweet_text = hydrated.quoted_tweet_text;
+        candidate.ancestor_texts = hydrated.ancestor_texts;
+    }
+}
+
+fn text_from_core<E>(
+    core: &HashMap<u64, Result<Option<xai_core_entities::entities::PureCoreData>, E>>,
+    id: u64,
+) -> Option<String> {
+    match core.get(&id) {
+        Some(Ok(Some(data))) if !data.text.is_empty() => Some(data.text.clone()),
+        _ => None,
     }
 }
 
@@ -102,5 +114,46 @@ mod tests {
 
         assert_eq!(with_quote.quoted_tweet_text.as_deref(), Some("quoted text"));
         assert_eq!(without_quote.quoted_tweet_text, None);
+        assert!(with_quote.ancestor_texts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fills_ancestor_texts_without_changing_ancestor_ids() {
+        let mut core_data = HashMap::new();
+        core_data.insert(
+            20,
+            Some(PureCoreData {
+                text: "parent spam".to_string(),
+                ..Default::default()
+            }),
+        );
+        core_data.insert(
+            10,
+            Some(PureCoreData {
+                text: "root text".to_string(),
+                ..Default::default()
+            }),
+        );
+        let client = Arc::new(MockTESClient {
+            core_data,
+            ..Default::default()
+        });
+        let hydrator = QuotedPostTextHydrator::new(client as Arc<dyn TESClient + Send + Sync>);
+
+        let mut reply = PostCandidate {
+            tweet_id: 30,
+            ancestors: vec![20, 10],
+            ..Default::default()
+        };
+
+        let hydrated = hydrator
+            .hydrate(&ScoredPostsQuery::default(), &[reply.clone()])
+            .await;
+        hydrator.update(&mut reply, hydrated[0].clone().unwrap());
+
+        assert_eq!(reply.ancestors, vec![20, 10]);
+        assert_eq!(reply.ancestor_texts.get(&20).map(String::as_str), Some("parent spam"));
+        assert_eq!(reply.ancestor_texts.get(&10).map(String::as_str), Some("root text"));
+        assert_eq!(reply.quoted_tweet_text, None);
     }
 }
