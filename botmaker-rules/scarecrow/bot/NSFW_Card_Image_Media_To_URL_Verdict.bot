@@ -4,7 +4,7 @@ condition: |
   Exists(category) &&
   Exists(entityId) &&
   category == "CARD_IMAGE" &&
-  IsNearPerfectNsfw
+  (IsNearPerfectNsfw || (Exists(precisionNewNsfw) && !IsHighRecallNsfw && !IsHighPrecisionNsfw))
 action: |
   {
     val :cardUrlLastHop = entityId;
@@ -18,11 +18,13 @@ action: |
       Log("nsfw_card_url_log", :cardUrlLastHop);
       IncrementStat("URLs_added_as_NSFW_CARD_IMAGE_in_Rep_Store", 1);
     }  else if(:verdict == "NSFW_CARD_IMAGE" &&
+      Exists(precisionNewNsfw) &&
       !IsHighRecallNsfw &&
       !IsHighPrecisionNsfw
     ) {
-      val :verdictCreationTime = DictGetOrElse(:lastHopVerdict, "creationTimestampInSec", 0);
-      if(:verdictCreationTime - (CurrentTimeMs()/1000) > (60 * 60 * 1000)) {
+      val :verdictCreationTimeInSec = DictGetOrElse(:lastHopVerdict, "creationTimestampInSec", 0);
+      val :verdictAgeInSec = (CurrentTimeMs() / 1000) - :verdictCreationTimeInSec;
+      if(:verdictAgeInSec > (60 * 60)) {
         DeleteUrlVerdictIf(:cardUrlLastHop, "EXACT_URL_MATCH", "NSFW_CARD_IMAGE", Join("_", "bot", RULE_ID), "botmaker");
         IncrementStat("URLs_removed_as_NSFW_CARD_IMAGE_in_Rep_Store", 1);
       };
