@@ -103,31 +103,15 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for VFCandidateHydrator {
         );
 
         let (in_network_result, oon_result) = join(in_network_future, oon_future).await;
-        let mut all_results: HashMap<u64, Result<Option<FilteredReason>>> = HashMap::new();
-        all_results.extend(in_network_result);
-        all_results.extend(oon_result);
+        let verdicts = VfVerdicts {
+            in_network: in_network_result,
+            oon: oon_result,
+        };
 
-        let mut hydrated_candidates = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            let primary_result = all_results.get(&candidate.tweet_id);
-            let visibility_reason = match primary_result {
-                Some(Ok(Some(reason))) => Some(reason.clone()),
-                _ => None,
-            };
-
-            let drop_ancillary = should_drop_ancillary(candidate, &all_results);
-
-            let hydrated = match primary_result {
-                Some(Err(err)) => Err(err.to_string()),
-                _ => Ok(PostCandidate {
-                    visibility_reason,
-                    drop_ancillary_posts: Some(drop_ancillary),
-                    ..Default::default()
-                }),
-            };
-            hydrated_candidates.push(hydrated);
-        }
-        hydrated_candidates
+        candidates
+            .iter()
+            .map(|candidate| resolve_visibility(candidate, &verdicts))
+            .collect()
     }
 
     fn update(&self, candidate: &mut PostCandidate, hydrated: PostCandidate) {
@@ -136,15 +120,60 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for VFCandidateHydrator {
     }
 }
 
-fn should_drop_ancillary(
+type VfResults = HashMap<u64, Result<Option<FilteredReason>>>;
+
+/// VF verdicts kept separate by the safety level each id was evaluated under.
+///
+/// The same tweet id can legitimately be requested at both levels: an
+/// in-network candidate may also be an ancestor or quoted post of another
+/// candidate (evaluated as a recommendation), and an out-of-network candidate
+/// may also be the source of a followed account's repost (evaluated as
+/// in-network). Collapsing the two maps into one keyed by id alone lets one
+/// verdict overwrite the other, so every lookup must go to the map that
+/// matches how the id was bucketed above.
+struct VfVerdicts {
+    in_network: VfResults,
+    oon: VfResults,
+}
+
+impl VfVerdicts {
+    fn primary(&self, candidate: &PostCandidate) -> Option<&Result<Option<FilteredReason>>> {
+        if candidate.in_network.unwrap_or(false) {
+            self.in_network.get(&candidate.tweet_id)
+        } else {
+            self.oon.get(&candidate.tweet_id)
+        }
+    }
+}
+
+fn resolve_visibility(
     candidate: &PostCandidate,
-    vf_results: &HashMap<u64, Result<Option<FilteredReason>>>,
-) -> bool {
+    verdicts: &VfVerdicts,
+) -> Result<PostCandidate, String> {
+    let primary_result = verdicts.primary(candidate);
+    let visibility_reason = match primary_result {
+        Some(Ok(Some(reason))) => Some(reason.clone()),
+        _ => None,
+    };
+
+    let drop_ancillary = should_drop_ancillary(candidate, verdicts);
+
+    match primary_result {
+        Some(Err(err)) => Err(err.to_string()),
+        _ => Ok(PostCandidate {
+            visibility_reason,
+            drop_ancillary_posts: Some(drop_ancillary),
+            ..Default::default()
+        }),
+    }
+}
+
+fn should_drop_ancillary(candidate: &PostCandidate, verdicts: &VfVerdicts) -> bool {
     for &ancestor_id in &candidate.ancestors {
         if candidate.tombstone_ancestor_ids.contains(&ancestor_id) {
             continue;
         }
-        if let Some(Ok(Some(reason))) = vf_results.get(&ancestor_id)
+        if let Some(Ok(Some(reason))) = verdicts.oon.get(&ancestor_id)
             && should_drop_reason(reason)
         {
             return true;
@@ -152,14 +181,14 @@ fn should_drop_ancillary(
     }
 
     if let Some(quoted_id) = candidate.quoted_tweet_id
-        && let Some(Ok(Some(reason))) = vf_results.get(&quoted_id)
+        && let Some(Ok(Some(reason))) = verdicts.oon.get(&quoted_id)
         && should_drop_reason(reason)
     {
         return true;
     }
 
     if let Some(retweeted_id) = candidate.retweeted_tweet_id
-        && let Some(Ok(Some(reason))) = vf_results.get(&retweeted_id)
+        && let Some(Ok(Some(reason))) = verdicts.in_network.get(&retweeted_id)
         && should_drop_reason(reason)
     {
         return true;
@@ -174,5 +203,258 @@ fn should_drop_reason(reason: &FilteredReason) -> bool {
             matches!(safety_result.action, Action::Drop(_))
         }
         _ => true, 
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use xai_visibility_filtering::models::SafetyResult;
+
+    fn oon_only_drop() -> FilteredReason {
+        FilteredReason::PossiblyUndesirable
+    }
+
+    fn interstitial() -> FilteredReason {
+        FilteredReason::SafetyResult(SafetyResult {
+            reason: None,
+            action: Action::Interstitial,
+        })
+    }
+
+    fn verdicts(
+        in_network: Vec<(u64, Result<Option<FilteredReason>>)>,
+        oon: Vec<(u64, Result<Option<FilteredReason>>)>,
+    ) -> VfVerdicts {
+        VfVerdicts {
+            in_network: in_network.into_iter().collect(),
+            oon: oon.into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn in_network_candidate_reads_timeline_home_verdict_when_id_is_also_an_oon_ancillary() {
+        let verdicts = verdicts(
+            vec![(1, Ok(None))],
+            vec![(1, Ok(Some(oon_only_drop()))), (2, Ok(None))],
+        );
+        let in_network_post = PostCandidate {
+            tweet_id: 1,
+            in_network: Some(true),
+            ..Default::default()
+        };
+
+        let hydrated = resolve_visibility(&in_network_post, &verdicts).unwrap();
+
+        assert_eq!(hydrated.visibility_reason, None);
+        assert_eq!(hydrated.drop_ancillary_posts, Some(false));
+    }
+
+    #[test]
+    fn oon_candidate_reads_recommendations_verdict_when_id_is_also_a_repost_source() {
+        let verdicts = verdicts(vec![(1, Ok(None))], vec![(1, Ok(Some(oon_only_drop())))]);
+        let oon_post = PostCandidate {
+            tweet_id: 1,
+            in_network: Some(false),
+            ..Default::default()
+        };
+
+        let hydrated = resolve_visibility(&oon_post, &verdicts).unwrap();
+
+        assert_eq!(hydrated.visibility_reason, Some(oon_only_drop()));
+    }
+
+    #[test]
+    fn missing_in_network_flag_is_treated_as_oon() {
+        let verdicts = verdicts(vec![(1, Ok(None))], vec![(1, Ok(Some(oon_only_drop())))]);
+        let post = PostCandidate {
+            tweet_id: 1,
+            in_network: None,
+            ..Default::default()
+        };
+
+        let hydrated = resolve_visibility(&post, &verdicts).unwrap();
+
+        assert_eq!(hydrated.visibility_reason, Some(oon_only_drop()));
+    }
+
+    #[test]
+    fn ancestors_and_quoted_posts_use_recommendations_verdict() {
+        let verdicts = verdicts(
+            vec![(10, Ok(None)), (20, Ok(None))],
+            vec![
+                (10, Ok(Some(oon_only_drop()))),
+                (20, Ok(Some(oon_only_drop()))),
+            ],
+        );
+
+        let reply = PostCandidate {
+            tweet_id: 1,
+            in_network: Some(true),
+            ancestors: vec![10],
+            ..Default::default()
+        };
+        assert!(should_drop_ancillary(&reply, &verdicts));
+
+        let quote = PostCandidate {
+            tweet_id: 2,
+            in_network: Some(true),
+            quoted_tweet_id: Some(20),
+            ..Default::default()
+        };
+        assert!(should_drop_ancillary(&quote, &verdicts));
+    }
+
+    #[test]
+    fn repost_source_uses_timeline_home_verdict() {
+        let verdicts = verdicts(vec![(10, Ok(None))], vec![(10, Ok(Some(oon_only_drop())))]);
+        let repost = PostCandidate {
+            tweet_id: 1,
+            in_network: Some(true),
+            retweeted_tweet_id: Some(10),
+            ..Default::default()
+        };
+
+        assert!(!should_drop_ancillary(&repost, &verdicts));
+
+        let source_dropped_in_network = VfVerdicts {
+            in_network: HashMap::from([(10, Ok(Some(oon_only_drop())))]),
+            oon: HashMap::new(),
+        };
+        assert!(should_drop_ancillary(&repost, &source_dropped_in_network));
+    }
+
+    #[test]
+    fn tombstoned_ancestors_are_skipped() {
+        let verdicts = verdicts(vec![], vec![(10, Ok(Some(oon_only_drop())))]);
+        let reply = PostCandidate {
+            tweet_id: 1,
+            ancestors: vec![10],
+            tombstone_ancestor_ids: vec![10],
+            ..Default::default()
+        };
+
+        assert!(!should_drop_ancillary(&reply, &verdicts));
+    }
+
+    #[test]
+    fn interstitial_on_ancillary_does_not_drop() {
+        let verdicts = verdicts(vec![], vec![(10, Ok(Some(interstitial())))]);
+        let quote = PostCandidate {
+            tweet_id: 1,
+            quoted_tweet_id: Some(10),
+            ..Default::default()
+        };
+
+        assert!(!should_drop_ancillary(&quote, &verdicts));
+    }
+
+    #[test]
+    fn primary_lookup_error_is_surfaced() {
+        let verdicts = verdicts(vec![(1, Err(anyhow::anyhow!("vf unavailable")))], vec![]);
+        let post = PostCandidate {
+            tweet_id: 1,
+            in_network: Some(true),
+            ..Default::default()
+        };
+
+        let err = resolve_visibility(&post, &verdicts).unwrap_err();
+
+        assert!(err.contains("vf unavailable"));
+    }
+
+    /// Answers Allow at TimelineHome and Drop at TimelineHomeRecommendations for
+    /// every id, mimicking a post whose author carries an OON-only label.
+    struct LevelSensitiveVfClient {
+        calls: Mutex<Vec<(SafetyLevel, Vec<u64>)>>,
+    }
+
+    #[async_trait]
+    impl VfClient for LevelSensitiveVfClient {
+        async fn get_result(
+            &self,
+            post_ids: Vec<u64>,
+            safety_level: SafetyLevel,
+            _for_user_id: u64,
+            _context: Option<TwitterContextViewer>,
+        ) -> HashMap<u64, Result<Option<FilteredReason>>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((safety_level.clone(), post_ids.clone()));
+            let reason = match safety_level {
+                TimelineHome => None,
+                _ => Some(oon_only_drop()),
+            };
+            post_ids
+                .into_iter()
+                .map(|id| (id, Ok(reason.clone())))
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn followed_author_thread_root_is_not_dropped_because_reply_lists_it_as_ancestor() {
+        let client = Arc::new(LevelSensitiveVfClient {
+            calls: Mutex::new(Vec::new()),
+        });
+        let hydrator = VFCandidateHydrator::new(client.clone(), client.clone()).await;
+        let root = PostCandidate {
+            tweet_id: 1,
+            in_network: Some(true),
+            ..Default::default()
+        };
+        let reply_in_thread = PostCandidate {
+            tweet_id: 2,
+            in_network: Some(true),
+            ancestors: vec![1],
+            ..Default::default()
+        };
+        let quote_of_root = PostCandidate {
+            tweet_id: 3,
+            in_network: Some(false),
+            quoted_tweet_id: Some(1),
+            ..Default::default()
+        };
+
+        let results = hydrator
+            .hydrate(
+                &ScoredPostsQuery::default(),
+                &[root, reply_in_thread, quote_of_root],
+            )
+            .await;
+
+        let root = results[0].as_ref().unwrap();
+        assert_eq!(
+            root.visibility_reason, None,
+            "in-network root must keep its TimelineHome verdict"
+        );
+        assert_eq!(root.drop_ancillary_posts, Some(false));
+
+        let reply = results[1].as_ref().unwrap();
+        assert_eq!(reply.visibility_reason, None);
+        assert_eq!(
+            reply.drop_ancillary_posts,
+            Some(true),
+            "ancestor is still judged as a recommendation"
+        );
+
+        let quote = results[2].as_ref().unwrap();
+        assert_eq!(quote.visibility_reason, Some(oon_only_drop()));
+        assert_eq!(quote.drop_ancillary_posts, Some(true));
+
+        let calls = client.calls.lock().unwrap();
+        let in_network_ids: Vec<u64> = calls
+            .iter()
+            .filter(|(level, _)| *level == TimelineHome)
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect();
+        let oon_ids: Vec<u64> = calls
+            .iter()
+            .filter(|(level, _)| *level == TimelineHomeRecommendations)
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect();
+        assert!(in_network_ids.contains(&1) && oon_ids.contains(&1));
     }
 }
