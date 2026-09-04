@@ -8,7 +8,7 @@ use serde::Serialize;
 use tracing::{info, warn};
 use xai_strato::Strato;
 
-use crate::allowlist::ManhattanAllowlist;
+use crate::allowlist::{AllowlistEntry, ManhattanAllowlist};
 use crate::entities::{self, HighPageRankUser};
 use crate::facts::{AllowlistFacts, CredFacts, EntityType, GizmoduckFacts};
 use crate::gizmoduck::GizmoduckCoreClient;
@@ -56,37 +56,45 @@ where
     }
 }
 
+/// Turns the result of an allowlist store lookup into facts.
+///
+/// A store error is propagated rather than mapped to `is_allowlisted: false`:
+/// the allowlist is an exemption, so "could not check" must stop enforcement
+/// (the caller retries) instead of silently reading as "not exempt". Only a
+/// confirmed `Ok(None)` from the store means the entity is not allowlisted.
+fn allowlist_facts(lookup: Result<Option<(AllowlistEntry, i64)>>) -> Result<AllowlistFacts> {
+    Ok(match lookup? {
+        Some((entry, ttl_secs)) => AllowlistFacts {
+            is_allowlisted: true,
+            added_by: Some(entry.added_by),
+            reason: Some(entry.reason),
+            ttl_secs: Some(ttl_secs),
+        },
+        None => AllowlistFacts::default(),
+    })
+}
+
 #[tracing::instrument(skip_all, fields(is_allowlisted))]
 pub async fn fetch_user_allowlist(
     allowlist: Option<&ManhattanAllowlist>,
     user_id: i64,
-) -> AllowlistFacts {
+) -> Result<AllowlistFacts> {
     let span = tracing::Span::current();
     let Some(al) = allowlist else {
         span.record("is_allowlisted", false);
-        return AllowlistFacts::default();
+        return Ok(AllowlistFacts::default());
     };
-    match al.get(user_id).await {
-        Some(record) => {
-            span.record("is_allowlisted", true);
-            warn!(
-                added_by = record.added_by,
-                ttl_secs = record.ttl_secs,
-                reason = record.reason,
-                "user is in allowlist; will skip",
-            );
-            AllowlistFacts {
-                is_allowlisted: true,
-                added_by: Some(record.added_by),
-                reason: Some(record.reason),
-                ttl_secs: Some(record.ttl_secs),
-            }
-        }
-        None => {
-            span.record("is_allowlisted", false);
-            AllowlistFacts::default()
-        }
+    let facts = allowlist_facts(al.get_entity(EntityType::User, user_id).await)?;
+    span.record("is_allowlisted", facts.is_allowlisted);
+    if facts.is_allowlisted {
+        warn!(
+            added_by = facts.added_by.as_deref(),
+            ttl_secs = facts.ttl_secs,
+            reason = facts.reason.as_deref(),
+            "user is in allowlist; will skip",
+        );
     }
+    Ok(facts)
 }
 
 #[tracing::instrument(skip_all, fields(entity_type = entity_type.as_str(), is_allowlisted))]
@@ -94,34 +102,24 @@ pub async fn fetch_entity_allowlist(
     allowlist: Option<&ManhattanAllowlist>,
     entity_type: EntityType,
     entity_id: i64,
-) -> AllowlistFacts {
+) -> Result<AllowlistFacts> {
     let span = tracing::Span::current();
     let Some(al) = allowlist else {
         span.record("is_allowlisted", false);
-        return AllowlistFacts::default();
+        return Ok(AllowlistFacts::default());
     };
-    match al.get_entity(entity_type, entity_id).await {
-        Some((entry, ttl_secs)) => {
-            span.record("is_allowlisted", true);
-            warn!(
-                entity_id,
-                added_by = entry.added_by,
-                ttl_secs,
-                reason = entry.reason,
-                "entity is in allowlist; will skip",
-            );
-            AllowlistFacts {
-                is_allowlisted: true,
-                added_by: Some(entry.added_by),
-                reason: Some(entry.reason),
-                ttl_secs: Some(ttl_secs),
-            }
-        }
-        None => {
-            span.record("is_allowlisted", false);
-            AllowlistFacts::default()
-        }
+    let facts = allowlist_facts(al.get_entity(entity_type, entity_id).await)?;
+    span.record("is_allowlisted", facts.is_allowlisted);
+    if facts.is_allowlisted {
+        warn!(
+            entity_id,
+            added_by = facts.added_by.as_deref(),
+            ttl_secs = facts.ttl_secs,
+            reason = facts.reason.as_deref(),
+            "entity is in allowlist; will skip",
+        );
     }
+    Ok(facts)
 }
 
 pub async fn fetch_user(gd: &GizmoduckCoreClient, user_id: i64) -> Result<GizmoduckFacts> {
@@ -279,5 +277,41 @@ mod tests {
         let json = r#"{"v": true}"#;
         let r: entities::StratoResponse<bool> = serde_json::from_str(json).unwrap();
         assert_eq!(r.v, Some(true));
+    }
+
+    #[test]
+    fn allowlist_facts_absent_is_not_allowlisted() {
+        let f = allowlist_facts(Ok(None)).unwrap();
+        assert!(!f.is_allowlisted);
+        assert_eq!(f.added_by, None);
+        assert_eq!(f.reason, None);
+        assert_eq!(f.ttl_secs, None);
+    }
+
+    #[test]
+    fn allowlist_facts_present_is_allowlisted() {
+        let entry = AllowlistEntry {
+            added_by: "oncall".into(),
+            reason: "false positive".into(),
+            added_at: 1_700_000_000,
+        };
+        let f = allowlist_facts(Ok(Some((entry, 3600)))).unwrap();
+        assert!(f.is_allowlisted);
+        assert_eq!(f.added_by.as_deref(), Some("oncall"));
+        assert_eq!(f.reason.as_deref(), Some("false positive"));
+        assert_eq!(f.ttl_secs, Some(3600));
+    }
+
+    #[test]
+    fn allowlist_facts_store_error_is_not_read_as_not_allowlisted() {
+        let err = allowlist_facts(Err(anyhow::anyhow!("manhattan unavailable")));
+        assert!(
+            err.is_err(),
+            "a failed allowlist lookup must propagate as an error, not as is_allowlisted=false"
+        );
+        assert!(err
+            .unwrap_err()
+            .to_string()
+            .contains("manhattan unavailable"));
     }
 }

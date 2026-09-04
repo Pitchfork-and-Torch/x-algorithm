@@ -1549,9 +1549,12 @@ pub async fn handle_allowlist_delete(
         );
     };
     info!("DELETE /api/allowlist/{user_id}");
+    // Audit snapshot only; a failed read must not block the delete.
     let before_json = al
         .get(user_id)
         .await
+        .ok()
+        .flatten()
         .map(|r| serde_json::to_string(&r).unwrap_or_default())
         .unwrap_or_default();
     let result = al.remove(user_id).await;
@@ -1619,7 +1622,21 @@ pub async fn bulk_allowlist_impl(
             continue;
         }
 
-        let existing_ttl = al.get(entry.user_id).await.map(|r| r.ttl_secs);
+        let existing_ttl = match al.get(entry.user_id).await {
+            Ok(existing) => existing.map(|r| r.ttl_secs),
+            Err(e) => {
+                errors += 1;
+                results.push(BulkRowResult {
+                    user_id: entry.user_id,
+                    ok: false,
+                    mode: String::new(),
+                    error: Some(format!("allowlist lookup failed: {e}")),
+                    existing_ttl_secs: None,
+                    ttl_secs: Some(entry.ttl_secs),
+                });
+                continue;
+            }
+        };
         let mode = if existing_ttl.is_some() {
             would_update += 1;
             "update"
@@ -1783,6 +1800,7 @@ pub async fn handle_allowlist_list(State(state): State<Arc<AppState>>) -> impl I
     responses(
         (status = 200, description = "Allowlist record for this user_id", body = AllowlistRecord),
         (status = 404, description = "No allowlist entry for this user_id"),
+        (status = 500, description = "Manhattan read failed"),
         (status = 503, description = "Allowlist not configured"),
     ),
 )]
@@ -1798,11 +1816,18 @@ pub async fn handle_allowlist_get(
         );
     };
     match al.get(user_id).await {
-        Some(record) => (
+        Ok(Some(record)) => (
             StatusCode::OK,
             Json(serde_json::to_value(&record).unwrap_or_default()),
         ),
-        None => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))),
+        Err(e) => {
+            error!("GET /api/allowlist/{user_id} failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        }
     }
 }
 
@@ -1820,6 +1845,7 @@ pub async fn handle_allowlist_get(
         (status = 200, description = "Allowlist record for this entity", body = Object),
         (status = 400, description = "Unknown entity_type"),
         (status = 404, description = "No allowlist entry for this entity"),
+        (status = 500, description = "Manhattan read failed"),
         (status = 503, description = "Allowlist not configured"),
     ),
 )]
@@ -1843,7 +1869,7 @@ pub async fn handle_allowlist_get_entity(
         );
     };
     match al.get_entity(et, entity_id).await {
-        Some((entry, ttl_secs)) => (
+        Ok(Some((entry, ttl_secs))) => (
             StatusCode::OK,
             Json(json!({
                 "entity_type": et.as_str(),
@@ -1854,7 +1880,14 @@ pub async fn handle_allowlist_get_entity(
                 "ttl_secs": ttl_secs,
             })),
         ),
-        None => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))),
+        Err(e) => {
+            error!("GET /api/allowlist/{}/{entity_id} failed: {e}", et.as_str());
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+        }
     }
 }
 
@@ -2009,9 +2042,12 @@ pub async fn handle_allowlist_delete_entity(
         );
     };
     info!("DELETE /api/allowlist/{}/{entity_id}", et.as_str());
+    // Audit snapshot only; a failed read must not block the delete.
     let before_json = al
         .get_entity(et, entity_id)
         .await
+        .ok()
+        .flatten()
         .map(|(entry, ttl_secs)| {
             json!({
                 "entity_type": et.as_str(),

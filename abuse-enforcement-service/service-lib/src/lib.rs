@@ -248,7 +248,7 @@ async fn run_enforcement_inner(
     let mut facts = match entity_type {
         EntityType::User => {
             let user_id = entity_id;
-            let allowlist = fetch_user_allowlist(ctx.allowlist.as_ref(), user_id).await;
+            let allowlist = fetch_user_allowlist(ctx.allowlist.as_ref(), user_id).await?;
             if allowlist.is_allowlisted {
                 let partial = Facts {
                     entity_type,
@@ -295,6 +295,7 @@ async fn run_enforcement_inner(
                 fetch_entity_allowlist(ctx.allowlist.as_ref(), EntityType::Post, entity_id),
                 fetch_user_allowlist(ctx.allowlist.as_ref(), author_id),
             );
+            let (post_allowlist, author_allowlist) = (post_allowlist?, author_allowlist?);
             if post_allowlist.is_allowlisted || author_allowlist.is_allowlisted {
                 let reason = if post_allowlist.is_allowlisted {
                     "post_in_allowlist"
