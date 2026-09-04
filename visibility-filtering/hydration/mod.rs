@@ -220,7 +220,7 @@ impl HydrationPipeline {
             let tes_hydration_failed = candidates
                 .iter()
                 .map(|c| c.tweet_id)
-                .filter(|id| tes_tweet_keyed.safety_critical_failed(id))
+                .filter(|id| tes_tweet_keyed.safety_hydration_failed(id, &core_datas))
                 .collect();
             let features = CandidateFeatures {
                 tweet_features,
