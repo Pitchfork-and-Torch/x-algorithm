@@ -12,6 +12,7 @@ use crate::candidate_hydrators::language_code_hydrator::LanguageCodeHydrator;
 use crate::candidate_hydrators::media_info_hydrator::MediaInfoHydrator;
 use crate::candidate_hydrators::mutual_follow_jaccard_hydrator::MutualFollowJaccardHydrator;
 use crate::candidate_hydrators::quote_hydrator::QuoteHydrator;
+use crate::candidate_hydrators::quoted_post_text_hydrator::QuotedPostTextHydrator;
 use crate::candidate_hydrators::semantic_id_hydrator::SemanticIdHydrator;
 use crate::candidate_hydrators::subscription_hydrator::SubscriptionHydrator;
 use crate::candidate_hydrators::topic_feedback_context_hydrator::TopicFeedbackContextHydrator;
@@ -331,6 +332,7 @@ impl PhoenixCandidatePipeline {
             }),
             Box::new(core_data_hydrator),
             Box::new(QuoteHydrator::new(tes_client.clone(), socialgraph_client.clone()).await),
+            Box::new(QuotedPostTextHydrator::new(tes_client.clone())),
             Box::new(MediaInfoHydrator::new(media_info_cache_client).await),
             Box::new(SubscriptionHydrator::new(tes_client.clone()).await),
             Box::new(GizmoduckCandidateHydrator::new(gizmoduck_client).await),
