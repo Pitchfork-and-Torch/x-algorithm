@@ -59,6 +59,7 @@ fn candidate_matches(
 ) -> bool {
     std::iter::once(candidate.tweet_text.as_str())
         .chain(candidate.quoted_tweet_text.as_deref())
+        .chain(candidate.retweeted_tweet_text.as_deref())
         .chain(candidate.ancestor_texts.values().map(String::as_str))
         .filter(|text| !text.is_empty())
         .any(|text| matcher.matches(&tokenizer.tokenize(text)))

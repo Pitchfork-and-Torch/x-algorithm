@@ -39,6 +39,8 @@ pub struct PostCandidate {
     pub ancestor_users: Vec<u64>,
     pub ancestor_texts: HashMap<u64, String>,
     pub quoted_tweet_text: Option<String>,
+    #[serde(default)]
+    pub retweeted_tweet_text: Option<String>,
     pub min_video_duration_ms: Option<i32>,
     pub quoted_video_duration_ms: Option<i32>,
     pub author_followers_count: Option<i32>,

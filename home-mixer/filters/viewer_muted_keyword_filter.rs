@@ -62,6 +62,7 @@ fn candidate_matches(
 ) -> bool {
     std::iter::once(candidate.tweet_text.as_str())
         .chain(candidate.quoted_tweet_text.as_deref())
+        .chain(candidate.retweeted_tweet_text.as_deref())
         .chain(candidate.ancestor_texts.values().map(String::as_str))
         .filter(|text| !text.is_empty())
         .any(|text| matcher.matches(&tokenizer.tokenize(text)))
@@ -377,6 +378,28 @@ mod tests {
         reply.ancestor_texts.insert(9, "this is spam content".to_string());
 
         let result = filter.filter(&query, vec![reply, create_test_candidate(2, "ok")]);
+
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.kept[0].tweet_id, 2);
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].tweet_id, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drops_retweet_whose_original_text_matches_muted_keyword() {
+        let filter = ViewerMutedKeywordFilter::new();
+        let query = create_test_query(vec!["spam".to_string()]);
+
+        let rt = PostCandidate {
+            tweet_id: 1,
+            tweet_text: String::new(),
+            retweeted_tweet_id: Some(50),
+            retweeted_tweet_text: Some("this is spam content".to_string()),
+            author_id: 12345,
+            ..Default::default()
+        };
+
+        let result = filter.filter(&query, vec![rt, create_test_candidate(2, "ok")]);
 
         assert_eq!(result.kept.len(), 1);
         assert_eq!(result.kept[0].tweet_id, 2);

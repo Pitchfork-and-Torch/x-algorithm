@@ -25,7 +25,12 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for QuotedPostTextHydrator {
     ) -> Vec<Result<PostCandidate, String>> {
         let fetch_ids: Vec<u64> = candidates
             .iter()
-            .flat_map(|c| c.quoted_tweet_id.into_iter().chain(c.ancestors.iter().copied()))
+            .flat_map(|c| {
+                c.quoted_tweet_id
+                    .into_iter()
+                    .chain(c.retweeted_tweet_id)
+                    .chain(c.ancestors.iter().copied())
+            })
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
@@ -43,6 +48,9 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for QuotedPostTextHydrator {
                     quoted_tweet_text: candidate
                         .quoted_tweet_id
                         .and_then(|id| text_from_core(&core, id)),
+                    retweeted_tweet_text: candidate
+                        .retweeted_tweet_id
+                        .and_then(|id| text_from_core(&core, id)),
                     ancestor_texts: candidate
                         .ancestors
                         .iter()
@@ -57,6 +65,7 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for QuotedPostTextHydrator {
 
     fn update(&self, candidate: &mut PostCandidate, hydrated: PostCandidate) {
         candidate.quoted_tweet_text = hydrated.quoted_tweet_text;
+        candidate.retweeted_tweet_text = hydrated.retweeted_tweet_text;
         candidate.ancestor_texts = hydrated.ancestor_texts;
     }
 }
@@ -155,5 +164,37 @@ mod tests {
         assert_eq!(reply.ancestor_texts.get(&20).map(String::as_str), Some("parent spam"));
         assert_eq!(reply.ancestor_texts.get(&10).map(String::as_str), Some("root text"));
         assert_eq!(reply.quoted_tweet_text, None);
+        assert_eq!(reply.retweeted_tweet_text, None);
+    }
+
+    #[tokio::test]
+    async fn fills_retweeted_tweet_text() {
+        let mut core_data = HashMap::new();
+        core_data.insert(
+            50,
+            Some(PureCoreData {
+                text: "original spam".to_string(),
+                ..Default::default()
+            }),
+        );
+        let client = Arc::new(MockTESClient {
+            core_data,
+            ..Default::default()
+        });
+        let hydrator = QuotedPostTextHydrator::new(client as Arc<dyn TESClient + Send + Sync>);
+
+        let mut rt = PostCandidate {
+            tweet_id: 51,
+            retweeted_tweet_id: Some(50),
+            ..Default::default()
+        };
+
+        let hydrated = hydrator
+            .hydrate(&ScoredPostsQuery::default(), &[rt.clone()])
+            .await;
+        hydrator.update(&mut rt, hydrated[0].clone().unwrap());
+
+        assert_eq!(rt.retweeted_tweet_text.as_deref(), Some("original spam"));
+        assert_eq!(rt.quoted_tweet_text, None);
     }
 }
