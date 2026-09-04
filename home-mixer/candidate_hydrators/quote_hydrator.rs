@@ -130,7 +130,8 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for QuoteHydrator {
             .into_iter()
             .collect();
 
-        let fetch_quoted_duration = query.params.get(EnableQuotedVqvDurationCheck);
+        let fetch_quoted_duration =
+            query.params.get(EnableQuotedVqvDurationCheck) || query.exclude_videos;
         let quoted_tweet_ids: Vec<u64> = if fetch_quoted_duration {
             resolved
                 .iter()

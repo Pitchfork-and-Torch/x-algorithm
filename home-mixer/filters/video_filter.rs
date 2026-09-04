@@ -14,9 +14,9 @@ impl Filter<ScoredPostsQuery, PostCandidate> for VideoFilter {
         _query: &ScoredPostsQuery,
         candidates: Vec<PostCandidate>,
     ) -> FilterResult<PostCandidate> {
-        let (kept, removed): (Vec<_>, Vec<_>) = candidates
-            .into_iter()
-            .partition(|c| c.min_video_duration_ms.is_none());
+        let (kept, removed): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|c| {
+            c.min_video_duration_ms.is_none() && c.quoted_video_duration_ms.is_none()
+        });
 
         FilterResult { kept, removed }
     }
@@ -95,5 +95,32 @@ mod tests {
         let result = VideoFilter.filter(&query, candidates);
         assert_eq!(result.kept.len(), 2);
         assert!(result.removed.is_empty());
+    }
+
+    #[test]
+    fn test_removes_quotes_of_videos() {
+        let query = ScoredPostsQuery {
+            exclude_videos: true,
+            ..Default::default()
+        };
+
+        let candidates = vec![
+            PostCandidate {
+                tweet_id: 1,
+                quoted_video_duration_ms: Some(5000),
+                ..Default::default()
+            },
+            PostCandidate {
+                tweet_id: 2,
+                quoted_video_duration_ms: None,
+                ..Default::default()
+            },
+        ];
+
+        let result = VideoFilter.filter(&query, candidates);
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.kept[0].tweet_id, 2);
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].tweet_id, 1);
     }
 }
