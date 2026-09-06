@@ -50,14 +50,18 @@ impl QuoteHydrator {
         }
     }
 
-    async fn get_blocked_by(&self, viewer_id: u64, quoted_user_ids: Vec<u64>) -> HashSet<u64> {
+    async fn get_blocked_by(
+        &self,
+        viewer_id: u64,
+        quoted_user_ids: Vec<u64>,
+    ) -> Result<HashSet<u64>, String> {
         if quoted_user_ids.is_empty() {
-            return HashSet::new();
+            return Ok(HashSet::new());
         }
         self.socialgraph_client
             .check_blocked_by(viewer_id, &quoted_user_ids)
             .await
-            .unwrap_or_default()
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -81,6 +85,7 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for QuoteHydrator {
         let tweet_ids: Vec<u64> = candidates.iter().map(|c| c.tweet_id).collect();
 
         let mut cache_misses: Vec<u64> = Vec::new();
+        let mut tes_failed: HashSet<u64> = HashSet::new();
         let mut resolved: Vec<(u64, Option<u64>, Option<u64>)> =
             Vec::with_capacity(tweet_ids.len());
 
@@ -104,22 +109,37 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for QuoteHydrator {
                 if !cache_misses.contains(&tweet_id) {
                     continue;
                 }
-                let (qt_tweet_id, qt_user_id) = match quoted_tweets.get(&tweet_id) {
-                    Some(Ok(Some(qt))) => (Some(qt.tweet_id), Some(qt.user_id)),
-                    _ => (None, None),
-                };
-                entry.1 = qt_tweet_id;
-                entry.2 = qt_user_id;
-
-                self.cache
-                    .insert(
-                        tweet_id,
-                        QuoteCacheValue {
-                            quoted_tweet_id: qt_tweet_id,
-                            quoted_user_id: qt_user_id,
-                        },
-                    )
-                    .await;
+                match quoted_tweets.get(&tweet_id) {
+                    Some(Ok(Some(qt))) => {
+                        entry.1 = Some(qt.tweet_id);
+                        entry.2 = Some(qt.user_id);
+                        self.cache
+                            .insert(
+                                tweet_id,
+                                QuoteCacheValue {
+                                    quoted_tweet_id: Some(qt.tweet_id),
+                                    quoted_user_id: Some(qt.user_id),
+                                },
+                            )
+                            .await;
+                    }
+                    Some(Ok(None)) => {
+                        entry.1 = None;
+                        entry.2 = None;
+                        self.cache
+                            .insert(
+                                tweet_id,
+                                QuoteCacheValue {
+                                    quoted_tweet_id: None,
+                                    quoted_user_id: None,
+                                },
+                            )
+                            .await;
+                    }
+                    _ => {
+                        tes_failed.insert(tweet_id);
+                    }
+                }
             }
         }
 
@@ -142,14 +162,20 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for QuoteHydrator {
             Vec::new()
         };
 
-        let (blocked_by, quoted_durations) = tokio::join!(
-            self.get_blocked_by(query.user_id, quoted_user_ids),
-            self.get_quoted_video_durations(quoted_tweet_ids),
-        );
+        let quoted_durations = self.get_quoted_video_durations(quoted_tweet_ids).await;
+        let blocked_by = match self.get_blocked_by(query.user_id, quoted_user_ids).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                return candidates.iter().map(|_| Err(e.clone())).collect();
+            }
+        };
 
         resolved
             .iter()
-            .map(|(_, qt_tweet_id, qt_user_id)| {
+            .map(|(tweet_id, qt_tweet_id, qt_user_id)| {
+                if tes_failed.contains(tweet_id) {
+                    return Err(format!("TES quoted-tweet lookup failed for {tweet_id}"));
+                }
                 let quoted_author_blocks_viewer = qt_user_id
                     .map(|uid| blocked_by.contains(&uid))
                     .unwrap_or(false);
