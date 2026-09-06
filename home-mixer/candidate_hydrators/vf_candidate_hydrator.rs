@@ -79,7 +79,11 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for VFCandidateHydrator {
                 oon_ids.push(quoted_id);
             }
             if let Some(retweeted_id) = candidate.retweeted_tweet_id {
-                in_network_ids.push(retweeted_id);
+                if candidate.in_network.unwrap_or(false) {
+                    in_network_ids.push(retweeted_id);
+                } else {
+                    oon_ids.push(retweeted_id);
+                }
             }
         }
 
@@ -179,6 +183,158 @@ fn should_drop_reason(reason: &FilteredReason) -> bool {
         FilteredReason::SafetyResult(safety_result) => {
             matches!(safety_result.action, Action::Drop(_))
         }
-        _ => true, 
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::query::ScoredPostsQuery;
+    use std::sync::Mutex;
+    use xai_safety_label_store::types::SafetyLabelMap;
+    use xai_twittercontext_proto::TwitterContextViewer;
+    use xai_visibility_filtering::models::{DropReason, SafetyResult, SafetyResultReason};
+    use xai_visibility_filtering::vf_client::SafetyLevel;
+
+    struct LevelClient {
+        home: HashMap<u64, FilteredReason>,
+        recs: HashMap<u64, FilteredReason>,
+        seen_home: Mutex<Vec<u64>>,
+        seen_recs: Mutex<Vec<u64>>,
+    }
+
+    fn vis(reason: FilteredReason) -> TweetVisibility {
+        TweetVisibility {
+            reason: Some(reason),
+            safety_labels: Ok(SafetyLabelMap::default()),
+        }
+    }
+
+    fn interstitial() -> FilteredReason {
+        FilteredReason::SafetyResult(SafetyResult {
+            reason: Some(SafetyResultReason::NsfwHighPrecision),
+            action: Action::Interstitial,
+        })
+    }
+
+    fn recs_drop() -> FilteredReason {
+        FilteredReason::SafetyResult(SafetyResult {
+            reason: Some(SafetyResultReason::NsfwHighPrecision),
+            action: Action::Drop(DropReason {}),
+        })
+    }
+
+    #[async_trait]
+    impl VfClient for LevelClient {
+        async fn get_result(
+            &self,
+            post_ids: Vec<u64>,
+            safety_level: SafetyLevel,
+            _for_user_id: u64,
+            _context: Option<TwitterContextViewer>,
+        ) -> HashMap<u64, Result<TweetVisibility>> {
+            let mut out = HashMap::new();
+            match safety_level {
+                SafetyLevel::TimelineHome => {
+                    self.seen_home.lock().unwrap().extend(post_ids.iter().copied());
+                    for id in post_ids {
+                        if let Some(reason) = self.home.get(&id) {
+                            out.insert(id, Ok(vis(reason.clone())));
+                        }
+                    }
+                }
+                SafetyLevel::TimelineHomeRecommendations => {
+                    self.seen_recs.lock().unwrap().extend(post_ids.iter().copied());
+                    for id in post_ids {
+                        if let Some(reason) = self.recs.get(&id) {
+                            out.insert(id, Ok(vis(reason.clone())));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            out
+        }
+    }
+
+    fn hydrator(client: Arc<LevelClient>) -> VFCandidateHydrator {
+        VFCandidateHydrator {
+            strato_vf_client: client.clone(),
+            xai_vf_client: client,
+        }
+    }
+
+    #[tokio::test]
+    async fn oon_retweet_original_uses_recs() {
+        let client = Arc::new(LevelClient {
+            home: HashMap::from([(1, interstitial()), (100, interstitial())]),
+            recs: HashMap::from([(100, recs_drop())]),
+            seen_home: Mutex::new(Vec::new()),
+            seen_recs: Mutex::new(Vec::new()),
+        });
+        let results = hydrator(client.clone())
+            .hydrate(
+                &ScoredPostsQuery::default(),
+                &[PostCandidate {
+                    tweet_id: 1,
+                    in_network: Some(false),
+                    retweeted_tweet_id: Some(100),
+                    ..Default::default()
+                }],
+            )
+            .await;
+        let hydrated = results[0].as_ref().unwrap();
+        assert_eq!(hydrated.drop_ancillary_posts, Some(true));
+        assert!(client.seen_recs.lock().unwrap().contains(&100));
+        assert!(!client.seen_home.lock().unwrap().contains(&100));
+    }
+
+    #[tokio::test]
+    async fn in_network_retweet_original_stays_on_home() {
+        let client = Arc::new(LevelClient {
+            home: HashMap::from([(2, interstitial()), (200, interstitial())]),
+            recs: HashMap::from([(200, recs_drop())]),
+            seen_home: Mutex::new(Vec::new()),
+            seen_recs: Mutex::new(Vec::new()),
+        });
+        let results = hydrator(client.clone())
+            .hydrate(
+                &ScoredPostsQuery::default(),
+                &[PostCandidate {
+                    tweet_id: 2,
+                    in_network: Some(true),
+                    retweeted_tweet_id: Some(200),
+                    ..Default::default()
+                }],
+            )
+            .await;
+        let hydrated = results[0].as_ref().unwrap();
+        assert_eq!(hydrated.drop_ancillary_posts, Some(false));
+        assert!(client.seen_home.lock().unwrap().contains(&200));
+        assert!(!client.seen_recs.lock().unwrap().contains(&200));
+    }
+
+    #[tokio::test]
+    async fn quoted_id_still_uses_recs() {
+        let client = Arc::new(LevelClient {
+            home: HashMap::from([(3, interstitial())]),
+            recs: HashMap::from([(99, recs_drop())]),
+            seen_home: Mutex::new(Vec::new()),
+            seen_recs: Mutex::new(Vec::new()),
+        });
+        let results = hydrator(client.clone())
+            .hydrate(
+                &ScoredPostsQuery::default(),
+                &[PostCandidate {
+                    tweet_id: 3,
+                    in_network: Some(true),
+                    quoted_tweet_id: Some(99),
+                    ..Default::default()
+                }],
+            )
+            .await;
+        assert_eq!(results[0].as_ref().unwrap().drop_ancillary_posts, Some(true));
+        assert!(client.seen_recs.lock().unwrap().contains(&99));
     }
 }
