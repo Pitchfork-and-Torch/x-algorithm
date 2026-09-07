@@ -19,10 +19,26 @@ impl Filter<ScoredPostsQuery, PostCandidate> for VFFilter {
     }
 }
 
+/// Home Mixer cannot render VF's soft hide actions. `Avoid` is Strato's
+/// hide-from-timeline / suppress verdict (the sample
+/// `homeMixerFilteredReason.Tweet` payload decodes to it). `Tombstone`
+/// replaces the post. `NotEvaluated` is a missing action on an otherwise
+/// present `SafetyResult` — fail closed, same as a None action.
+///
+/// `Interstitial` stays visible here: TimelineHome NSFW is an interstitial
+/// for in-network posts. Ancillary wrappers drop it in
+/// `should_drop_reason` because the quote/reply card has no warning UI.
+fn safety_action_hides_from_timeline(action: &Action) -> bool {
+    match action {
+        Action::Allow | Action::Interstitial | Action::Downrank => false,
+        Action::Drop(_) | Action::Avoid | Action::Tombstone | Action::NotEvaluated => true,
+    }
+}
+
 fn should_drop(reason: &Option<FilteredReason>) -> bool {
     match reason {
         Some(FilteredReason::SafetyResult(safety_result)) => {
-            matches!(safety_result.action, Action::Drop(_))
+            safety_action_hides_from_timeline(&safety_result.action)
         }
         Some(_) => true,
         None => false,
@@ -94,5 +110,42 @@ mod tests {
 
         assert_eq!(result.removed.len(), 1);
         assert_eq!(result.kept.len(), 1);
+    }
+
+    fn safety(action: Action) -> FilteredReason {
+        FilteredReason::SafetyResult(xai_visibility_filtering::models::SafetyResult {
+            action,
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn drops_avoid_tombstone_and_not_evaluated() {
+        let filter = VFFilter;
+        let query = ScoredPostsQuery::default();
+
+        let result = filter.filter(
+            &query,
+            vec![
+                candidate_with_reason(Some(safety(Action::Avoid))),
+                candidate_with_reason(Some(safety(Action::Tombstone))),
+                candidate_with_reason(Some(safety(Action::NotEvaluated))),
+                candidate_with_reason(Some(safety(Action::Interstitial))),
+                candidate_with_reason(Some(safety(Action::Downrank))),
+                candidate_with_reason(None),
+            ],
+        );
+
+        assert_eq!(result.removed.len(), 3);
+        assert_eq!(result.kept.len(), 3);
+        assert!(matches!(
+            result.kept[0].visibility_reason,
+            Some(FilteredReason::SafetyResult(ref sr)) if sr.action == Action::Interstitial
+        ));
+        assert!(matches!(
+            result.kept[1].visibility_reason,
+            Some(FilteredReason::SafetyResult(ref sr)) if sr.action == Action::Downrank
+        ));
+        assert_eq!(result.kept[2].visibility_reason, None);
     }
 }

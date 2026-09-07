@@ -174,11 +174,112 @@ pub(crate) fn should_drop_ancillary(
     false
 }
 
+/// Soft VF verdicts on a quoted / ancestor / retweeted child must drop the
+/// wrapper. Home Mixer has no interstitial, tombstone, or avoid chrome for
+/// an embedded post, so keeping the card shows content soft-policy hid.
 fn should_drop_reason(reason: &FilteredReason) -> bool {
     match reason {
-        FilteredReason::SafetyResult(safety_result) => {
-            matches!(safety_result.action, Action::Drop(_))
+        FilteredReason::SafetyResult(safety_result) => match safety_result.action {
+            Action::Allow | Action::Downrank => false,
+            Action::Drop(_)
+            | Action::Avoid
+            | Action::Tombstone
+            | Action::Interstitial
+            | Action::NotEvaluated => true,
+        },
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn safety(action: Action) -> FilteredReason {
+        FilteredReason::SafetyResult(xai_visibility_filtering::models::SafetyResult {
+            action,
+            ..Default::default()
+        })
+    }
+
+    fn results(
+        entries: Vec<(u64, Result<Option<FilteredReason>>)>,
+    ) -> HashMap<u64, Result<Option<FilteredReason>>> {
+        entries.into_iter().collect()
+    }
+
+    fn quote_of(child_id: u64) -> PostCandidate {
+        PostCandidate {
+            tweet_id: 1,
+            quoted_tweet_id: Some(child_id),
+            ..Default::default()
         }
-        _ => true, 
+    }
+
+    #[test]
+    fn ancillary_soft_hide_drops_quote() {
+        for action in [
+            Action::Avoid,
+            Action::Tombstone,
+            Action::Interstitial,
+            Action::NotEvaluated,
+            Action::Drop(Default::default()),
+        ] {
+            let vf = results(vec![(1, Ok(None)), (10, Ok(Some(safety(action))))]);
+            assert!(
+                should_drop_ancillary(&quote_of(10), &vf),
+                "ancillary {action:?} must drop the wrapper"
+            );
+        }
+    }
+
+    #[test]
+    fn ancillary_allow_and_downrank_keep_quote() {
+        for action in [Action::Allow, Action::Downrank] {
+            let vf = results(vec![(1, Ok(None)), (10, Ok(Some(safety(action))))]);
+            assert!(
+                !should_drop_ancillary(&quote_of(10), &vf),
+                "ancillary {action:?} must not drop the wrapper"
+            );
+        }
+
+        let allow_none = results(vec![(1, Ok(None)), (10, Ok(None))]);
+        assert!(!should_drop_ancillary(&quote_of(10), &allow_none));
+    }
+
+    #[test]
+    fn ancillary_err_or_missing_still_fail_open_here() {
+        // Primary/ancillary Err+miss is #121. This class is soft verdicts.
+        let err = results(vec![(1, Ok(None)), (10, Err(anyhow::anyhow!("vf down")))]);
+        assert!(!should_drop_ancillary(&quote_of(10), &err));
+
+        let missing = results(vec![(1, Ok(None))]);
+        assert!(!should_drop_ancillary(&quote_of(10), &missing));
+    }
+
+    #[test]
+    fn interstitial_on_ancestor_drops_reply() {
+        let vf = results(vec![
+            (1, Ok(None)),
+            (10, Ok(Some(safety(Action::Interstitial)))),
+        ]);
+        let reply = PostCandidate {
+            tweet_id: 1,
+            ancestors: vec![10],
+            ..Default::default()
+        };
+        assert!(should_drop_ancillary(&reply, &vf));
+    }
+
+    #[test]
+    fn tombstoned_ancestor_soft_hide_is_still_skipped() {
+        let vf = results(vec![(10, Ok(Some(safety(Action::Interstitial))))]);
+        let reply = PostCandidate {
+            tweet_id: 1,
+            ancestors: vec![10],
+            tombstone_ancestor_ids: vec![10],
+            ..Default::default()
+        };
+        assert!(!should_drop_ancillary(&reply, &vf));
     }
 }
