@@ -146,25 +146,38 @@ impl VfVerdicts {
     }
 }
 
+/// Same sentinel `XaiVfClient::results_to_map` already writes for a missing
+/// response id. `VFFilter` hard-drops every non-`SafetyResult` reason, so this
+/// reaches the filter. Returning `Err` does not: `Hydrator::update_all` skips
+/// the write and leaves `visibility_reason = None`, which `VFFilter` keeps.
+fn vf_lookup_unavailable() -> FilteredReason {
+    FilteredReason::UnspecifiedReason
+}
+
 fn resolve_visibility(
     candidate: &PostCandidate,
     verdicts: &VfVerdicts,
 ) -> Result<PostCandidate, String> {
     let primary_result = verdicts.primary(candidate);
+    // Ok(None) is a successful Allow. Err and a missing map key are not.
     let visibility_reason = match primary_result {
         Some(Ok(Some(reason))) => Some(reason.clone()),
-        _ => None,
+        Some(Ok(None)) => None,
+        Some(Err(_)) | None => Some(vf_lookup_unavailable()),
     };
 
-    let drop_ancillary = should_drop_ancillary(candidate, verdicts);
+    Ok(PostCandidate {
+        visibility_reason,
+        drop_ancillary_posts: Some(should_drop_ancillary(candidate, verdicts)),
+        ..Default::default()
+    })
+}
 
-    match primary_result {
-        Some(Err(err)) => Err(err.to_string()),
-        _ => Ok(PostCandidate {
-            visibility_reason,
-            drop_ancillary_posts: Some(drop_ancillary),
-            ..Default::default()
-        }),
+fn ancillary_verdict_blocks(verdict: Option<&Result<Option<FilteredReason>>>) -> bool {
+    match verdict {
+        Some(Ok(Some(reason))) => should_drop_reason(reason),
+        Some(Ok(None)) => false,
+        Some(Err(_)) | None => true,
     }
 }
 
@@ -173,23 +186,19 @@ fn should_drop_ancillary(candidate: &PostCandidate, verdicts: &VfVerdicts) -> bo
         if candidate.tombstone_ancestor_ids.contains(&ancestor_id) {
             continue;
         }
-        if let Some(Ok(Some(reason))) = verdicts.oon.get(&ancestor_id)
-            && should_drop_reason(reason)
-        {
+        if ancillary_verdict_blocks(verdicts.oon.get(&ancestor_id)) {
             return true;
         }
     }
 
     if let Some(quoted_id) = candidate.quoted_tweet_id
-        && let Some(Ok(Some(reason))) = verdicts.oon.get(&quoted_id)
-        && should_drop_reason(reason)
+        && ancillary_verdict_blocks(verdicts.oon.get(&quoted_id))
     {
         return true;
     }
 
     if let Some(retweeted_id) = candidate.retweeted_tweet_id
-        && let Some(Ok(Some(reason))) = verdicts.in_network.get(&retweeted_id)
-        && should_drop_reason(reason)
+        && ancillary_verdict_blocks(verdicts.in_network.get(&retweeted_id))
     {
         return true;
     }
@@ -202,7 +211,7 @@ fn should_drop_reason(reason: &FilteredReason) -> bool {
         FilteredReason::SafetyResult(safety_result) => {
             matches!(safety_result.action, Action::Drop(_))
         }
-        _ => true, 
+        _ => true,
     }
 }
 
@@ -351,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_lookup_error_is_surfaced() {
+    fn primary_lookup_error_stamps_unspecified_reason() {
         let verdicts = verdicts(vec![(1, Err(anyhow::anyhow!("vf unavailable")))], vec![]);
         let post = PostCandidate {
             tweet_id: 1,
@@ -359,9 +368,90 @@ mod tests {
             ..Default::default()
         };
 
-        let err = resolve_visibility(&post, &verdicts).unwrap_err();
+        let hydrated = resolve_visibility(&post, &verdicts).unwrap();
 
-        assert!(err.contains("vf unavailable"));
+        assert_eq!(
+            hydrated.visibility_reason,
+            Some(FilteredReason::UnspecifiedReason)
+        );
+        assert_eq!(hydrated.drop_ancillary_posts, Some(false));
+    }
+
+    #[test]
+    fn primary_missing_key_stamps_unspecified_reason() {
+        let verdicts = verdicts(vec![], vec![]);
+        let post = PostCandidate {
+            tweet_id: 1,
+            in_network: Some(true),
+            ..Default::default()
+        };
+
+        let hydrated = resolve_visibility(&post, &verdicts).unwrap();
+
+        assert_eq!(
+            hydrated.visibility_reason,
+            Some(FilteredReason::UnspecifiedReason)
+        );
+    }
+
+    #[test]
+    fn primary_allow_none_stays_none() {
+        let verdicts = verdicts(vec![(1, Ok(None))], vec![]);
+        let post = PostCandidate {
+            tweet_id: 1,
+            in_network: Some(true),
+            ..Default::default()
+        };
+
+        let hydrated = resolve_visibility(&post, &verdicts).unwrap();
+
+        assert_eq!(hydrated.visibility_reason, None);
+        assert_eq!(hydrated.drop_ancillary_posts, Some(false));
+    }
+
+    #[test]
+    fn ancillary_error_drops() {
+        let verdicts = verdicts(
+            vec![(1, Ok(None))],
+            vec![(10, Err(anyhow::anyhow!("vf unavailable")))],
+        );
+        let quote = PostCandidate {
+            tweet_id: 1,
+            in_network: Some(true),
+            quoted_tweet_id: Some(10),
+            ..Default::default()
+        };
+
+        assert!(should_drop_ancillary(&quote, &verdicts));
+        let hydrated = resolve_visibility(&quote, &verdicts).unwrap();
+        assert_eq!(hydrated.visibility_reason, None);
+        assert_eq!(hydrated.drop_ancillary_posts, Some(true));
+    }
+
+    #[test]
+    fn ancillary_missing_key_drops() {
+        let verdicts = verdicts(vec![(1, Ok(None))], vec![]);
+        let reply = PostCandidate {
+            tweet_id: 1,
+            in_network: Some(true),
+            ancestors: vec![10],
+            ..Default::default()
+        };
+
+        assert!(should_drop_ancillary(&reply, &verdicts));
+    }
+
+    #[test]
+    fn ancillary_allow_none_does_not_drop() {
+        let verdicts = verdicts(vec![(1, Ok(None))], vec![(10, Ok(None))]);
+        let quote = PostCandidate {
+            tweet_id: 1,
+            in_network: Some(true),
+            quoted_tweet_id: Some(10),
+            ..Default::default()
+        };
+
+        assert!(!should_drop_ancillary(&quote, &verdicts));
     }
 
     /// Answers Allow at TimelineHome and Drop at TimelineHomeRecommendations for
@@ -456,5 +546,66 @@ mod tests {
             .flat_map(|(_, ids)| ids.iter().copied())
             .collect();
         assert!(in_network_ids.contains(&1) && oon_ids.contains(&1));
+    }
+
+    /// Returns Err for tweet 1, omits tweet 2, Allow for tweet 3.
+    struct LookupMissVfClient;
+
+    #[async_trait]
+    impl VfClient for LookupMissVfClient {
+        async fn get_result(
+            &self,
+            post_ids: Vec<u64>,
+            _safety_level: SafetyLevel,
+            _for_user_id: u64,
+            _context: Option<TwitterContextViewer>,
+        ) -> HashMap<u64, Result<Option<FilteredReason>>> {
+            post_ids
+                .into_iter()
+                .filter_map(|id| match id {
+                    1 => Some((id, Err(anyhow::anyhow!("vf unavailable")))),
+                    2 => None,
+                    _ => Some((id, Ok(None))),
+                })
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn hydrate_rpc_err_and_omitted_id_stamp_unspecified_allow_does_not() {
+        let client = Arc::new(LookupMissVfClient);
+        let hydrator = VFCandidateHydrator::new(client.clone(), client).await;
+        let err_post = PostCandidate {
+            tweet_id: 1,
+            in_network: Some(true),
+            ..Default::default()
+        };
+        let omitted_post = PostCandidate {
+            tweet_id: 2,
+            in_network: Some(true),
+            ..Default::default()
+        };
+        let allow_post = PostCandidate {
+            tweet_id: 3,
+            in_network: Some(true),
+            ..Default::default()
+        };
+
+        let results = hydrator
+            .hydrate(
+                &ScoredPostsQuery::default(),
+                &[err_post, omitted_post, allow_post],
+            )
+            .await;
+
+        assert_eq!(
+            results[0].as_ref().unwrap().visibility_reason,
+            Some(FilteredReason::UnspecifiedReason)
+        );
+        assert_eq!(
+            results[1].as_ref().unwrap().visibility_reason,
+            Some(FilteredReason::UnspecifiedReason)
+        );
+        assert_eq!(results[2].as_ref().unwrap().visibility_reason, None);
     }
 }
