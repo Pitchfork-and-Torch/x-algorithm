@@ -324,12 +324,15 @@ impl PhoenixCandidatePipeline {
             cached_posts_source,
         ];
 
+        // BidirectionalFollow reads author_id. It has to run after CoreData or
+        // TweetMixer rows (author_id = 0) get a false mutual-follow stamp that
+        // TES never overwrites. InNetwork-before-CoreData is a separate leftover.
         let hydrators: Vec<Box<dyn Hydrator<ScoredPostsQuery, PostCandidate>>> = vec![
             Box::new(InNetworkCandidateHydrator),
+            Box::new(core_data_hydrator),
             Box::new(BidirectionalFollowHydrator {
                 socialgraph_client: socialgraph_client.clone(),
             }),
-            Box::new(core_data_hydrator),
             Box::new(QuoteHydrator::new(tes_client.clone(), socialgraph_client.clone()).await),
             Box::new(MediaInfoHydrator::new(media_info_cache_client).await),
             Box::new(SubscriptionHydrator::new(tes_client.clone()).await),

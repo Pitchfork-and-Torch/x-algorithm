@@ -30,10 +30,12 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for BidirectionalFollowHydrator {
             .collect();
         let check_all_authors = query.params.get(EnableAllAuthorFollowHydration);
 
+        // CoreData fills author_id. A 0 here is unhydrated, not user 0 — do not
+        // query socialgraph for it or stamp false mutual-follow on the row.
         let authors: Vec<u64> = candidates
             .iter()
             .map(|c| c.author_id)
-            .filter(|a| check_all_authors || following.contains(&(*a as i64)))
+            .filter(|a| *a != 0 && (check_all_authors || following.contains(&(*a as i64))))
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
@@ -54,6 +56,9 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for BidirectionalFollowHydrator {
         candidates
             .iter()
             .map(|c| {
+                if c.author_id == 0 {
+                    return Ok(PostCandidate::default());
+                }
                 let author_follows_viewer = followers.contains(&c.author_id);
                 Ok(PostCandidate {
                     author_follows_viewer: check_all_authors.then_some(author_follows_viewer),
@@ -67,8 +72,10 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for BidirectionalFollowHydrator {
     }
 
     fn update(&self, candidate: &mut PostCandidate, hydrated: PostCandidate) {
-        candidate.is_mutual_follow_author = hydrated.is_mutual_follow_author;
-        candidate.author_follows_viewer = hydrated.author_follows_viewer;
+        if hydrated.is_mutual_follow_author.is_some() {
+            candidate.is_mutual_follow_author = hydrated.is_mutual_follow_author;
+            candidate.author_follows_viewer = hydrated.author_follows_viewer;
+        }
     }
 }
 
@@ -182,6 +189,35 @@ mod tests {
             out[2].as_ref().unwrap().is_mutual_follow_author,
             Some(false)
         );
+    }
+
+    #[tokio::test]
+    async fn unhydrated_author_id_is_not_stamped() {
+        let hydrator = hydrator(vec![0, 2]);
+        let q = query(vec![0, 2], true);
+        let candidates = vec![candidate(0), candidate(2)];
+
+        let out = hydrator.hydrate(&q, &candidates).await;
+
+        assert_eq!(out[0].as_ref().unwrap().is_mutual_follow_author, None);
+        assert_eq!(out[0].as_ref().unwrap().author_follows_viewer, None);
+        assert_eq!(out[1].as_ref().unwrap().is_mutual_follow_author, Some(true));
+    }
+
+    #[test]
+    fn update_skips_unhydrated_author_stamp() {
+        let hydrator = hydrator(vec![]);
+        let mut candidate = candidate(2);
+        candidate.is_mutual_follow_author = Some(true);
+        hydrator.update(
+            &mut candidate,
+            PostCandidate {
+                is_mutual_follow_author: None,
+                author_follows_viewer: None,
+                ..Default::default()
+            },
+        );
+        assert_eq!(candidate.is_mutual_follow_author, Some(true));
     }
 
     #[tokio::test]

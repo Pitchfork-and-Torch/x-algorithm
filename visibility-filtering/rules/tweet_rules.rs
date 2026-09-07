@@ -675,6 +675,9 @@ mod tests {
 
         assert_allows(underage, &gating_viewer(ViewerAge::Known(18)), &hp);
         assert_allows(underage, &gating_viewer(ViewerAge::Known(18)), &text);
+        // gizmoduck age 0 is a missing-birthday sentinel, not a confirmed infant.
+        assert_allows(underage, &gating_viewer(ViewerAge::Known(0)), &hp);
+        assert_allows(underage, &gating_viewer(ViewerAge::Known(0)), &text);
         assert_allows(underage, &gating_viewer(ViewerAge::Unknown), &hp);
         assert_allows(no_age, &gating_viewer(ViewerAge::Unknown), &hp);
         assert_allows(underage, &gating_viewer(ViewerAge::Unknown), &text);
@@ -1042,6 +1045,19 @@ mod tests {
             ..gating_viewer(ViewerAge::NotStated)
         };
         assert_drops(no_age, &request_fallback, &hp, &reason);
+    }
+
+    #[test]
+    fn zero_known_age_does_not_underage_drop_outside_gating_country() {
+        let underage = sensitive_spec("SensitiveViewerUnderageDropRule");
+        let no_age = sensitive_spec("SensitiveViewerNoStatedAgeDropRule");
+        let hp = media_label(SafetyLabelType::NSFW_HIGH_PRECISION);
+        let us = ViewerFeatures {
+            country_code: Some("us".into()),
+            ..gating_viewer(ViewerAge::Known(0))
+        };
+        assert_allows(underage, &us, &hp);
+        assert_allows(no_age, &us, &hp);
     }
 
     fn all_rule_slices() -> [&'static [RuleSpec]; 15] {
