@@ -155,6 +155,10 @@ pub(super) const OON_TWEET_LABEL_DROPS: &[RuleSpec] = &[
 ];
 
 fn drop_exclusive_tweet_content(context: &RuleContext<'_>) -> VfAction {
+    if context.tweet().exclusive_hydration_failed() {
+        return VfAction::Drop(FilteredReason::ExclusiveTweet);
+    }
+
     if !context.tweet().is_exclusive() {
         return VfAction::Allow;
     }
@@ -561,6 +565,27 @@ mod tests {
             spec,
             &viewer(200),
             &retweet,
+            &FilteredReason::ExclusiveTweet,
+        );
+
+        let mut lookup_failed = candidate().build();
+        lookup_failed.exclusive_hydration_failed = true;
+        assert_drops(
+            spec,
+            &viewer(VIEWER_ID),
+            &lookup_failed,
+            &FilteredReason::ExclusiveTweet,
+        );
+        assert_drops(
+            spec,
+            &author_viewer(),
+            &lookup_failed,
+            &FilteredReason::ExclusiveTweet,
+        );
+        assert_drops(
+            spec,
+            &logged_out_viewer(),
+            &lookup_failed,
             &FilteredReason::ExclusiveTweet,
         );
     }

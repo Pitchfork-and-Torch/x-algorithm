@@ -18,7 +18,7 @@ use crate::models::{
 use crate::rules::SafetyLevel;
 use crate::safety_label_source::SafetyLabelSource;
 use batch::TweetHydrationBatch;
-use exclusive_content_hydrator::ExclusiveContentHydrator;
+use exclusive_content_hydrator::{exclusive_slot, ExclusiveContentHydrator};
 use fallback_cache::FallbackCache;
 use gizmoduck_hydrator::GizmoduckAuthorHydrator;
 use safety_label_hydrator::{SafetyLabelHydration, SafetyLabelHydrator};
@@ -59,7 +59,7 @@ struct CandidateFeatures {
     author_features: TweetHydrationBatch<AuthorFeatures>,
     safety_labels: HashMap<TweetId, SafetyLabelMap>,
     relationships: TweetHydrationBatch<ViewerAuthorRelationship>,
-    exclusive_content: HashMap<TweetId, Option<ExclusiveContentFeatures>>,
+    exclusive_content: crate::hydration::batch::TweetHydrationBatch<ExclusiveContentFeatures>,
 }
 
 impl CandidateFeatures {
@@ -67,6 +67,8 @@ impl CandidateFeatures {
         candidates
             .iter()
             .map(|c| {
+                let (exclusive_content, exclusive_hydration_failed) =
+                    exclusive_slot(&self.exclusive_content, &c.tweet_id);
                 assemble(
                     c,
                     self.tweet_features
@@ -79,10 +81,8 @@ impl CandidateFeatures {
                         .cloned()
                         .unwrap_or_default(),
                     self.relationships.get_or_default(&c.tweet_id),
-                    self.exclusive_content
-                        .get(&c.tweet_id)
-                        .cloned()
-                        .unwrap_or_default(),
+                    exclusive_content,
+                    exclusive_hydration_failed,
                 )
             })
             .collect()
@@ -295,7 +295,13 @@ mod tests {
                     })),
                 )]),
             ),
-            exclusive_content: HashMap::new(),
+            exclusive_content: TweetHydrationBatch::from_results(
+                [TweetId(2)],
+                HashMap::from([(
+                    TweetId(2),
+                    Ok::<Option<ExclusiveContentFeatures>, anyhow::Error>(None),
+                )]),
+            ),
         };
 
         let assembled = results.assemble(&candidates);
@@ -307,6 +313,44 @@ mod tests {
         assert_eq!(c.tweet_features.core.source_tweet_id, Some(2));
         assert!(c.author_features.is_suspended);
         assert!(c.relationship.viewer_follows_author);
+        assert!(!c.exclusive_hydration_failed);
+        assert!(c.exclusive_content.is_none());
+    }
+
+    #[test]
+    fn assemble_marks_failed_exclusive_lookup() {
+        let resolved = resolve_candidate(&raw(1, Some(100)), &HashMap::new()).unwrap();
+        let results = CandidateFeatures {
+            tweet_features: HashMap::new(),
+            author_features: TweetHydrationBatch::from_results(
+                [TweetId(1)],
+                HashMap::from([(
+                    TweetId(1),
+                    Ok::<_, anyhow::Error>(Some(AuthorFeatures::default())),
+                )]),
+            ),
+            safety_labels: HashMap::from([(TweetId(1), SafetyLabelMap::default())]),
+            relationships: TweetHydrationBatch::from_results(
+                [TweetId(1)],
+                HashMap::from([(
+                    TweetId(1),
+                    Ok::<_, anyhow::Error>(Some(ViewerAuthorRelationship::default())),
+                )]),
+            ),
+            exclusive_content: TweetHydrationBatch::from_results(
+                [TweetId(1)],
+                HashMap::from([(
+                    TweetId(1),
+                    Err::<Option<ExclusiveContentFeatures>, _>("tes exclusive timeout"),
+                )]),
+            ),
+        };
+
+        let assembled = results.assemble(&[resolved]);
+
+        assert_eq!(assembled.len(), 1);
+        assert!(assembled[0].exclusive_hydration_failed);
+        assert!(assembled[0].exclusive_content.is_none());
     }
 
     fn raw(tweet_id: u64, request_author_id: Option<u64>) -> RawCandidate {
