@@ -1,4 +1,4 @@
-use crate::hydration::batch::TweetHydrationBatch;
+use crate::hydration::batch::{Hydrated, TweetHydrationBatch};
 use crate::hydration::metrics::{record_batch_size, timed_keyed_rpc, timed_results};
 use crate::models::{
     CoreFeature, MediaFeature, NsfwFeature, TweetCandidateInput, TweetFeatures, TweetId,
@@ -26,6 +26,26 @@ pub(crate) struct TweetHydration {
     pub(crate) takedown_reasons: TweetHydrationBatch<Vec<TakedownReason>>,
     pub(crate) edit_control: TweetHydrationBatch<EditControl>,
     pub(crate) media: TweetHydrationBatch<MediaFeature>,
+}
+
+impl TweetHydration {
+    /// TES `get_edit_control` Failed must not assemble as `None`.
+    /// `is_stale_tweet` treats missing edit control as current, so a stale
+    /// tombstone (pre-edit labeled text) would serve. Genuine NotFound
+    /// (never edited) is not Failed.
+    pub(crate) fn edit_control_lookup_failed(&self, id: TweetId) -> bool {
+        matches!(self.edit_control.hydrated(&id), Some(Hydrated::Failed(_)))
+    }
+}
+
+pub(crate) fn retain_candidates_with_usable_edit_control(
+    candidates: Vec<TweetCandidateInput>,
+    tweet_keyed: &TweetHydration,
+) -> Vec<TweetCandidateInput> {
+    candidates
+        .into_iter()
+        .filter(|c| !tweet_keyed.edit_control_lookup_failed(c.tweet_id))
+        .collect()
 }
 
 impl TesHydrator {
@@ -473,5 +493,113 @@ mod tests {
         let f = &features[&TweetId(10)];
         assert!(f.core.text.is_empty());
         assert!(!f.media.has_media);
+    }
+
+    fn found_edit_control(id: u64) -> TweetHydrationBatch<EditControl> {
+        found(id, EditControl::Initial(Default::default()))
+    }
+
+    fn not_found_edit_control(id: u64) -> TweetHydrationBatch<EditControl> {
+        TweetHydrationBatch::from_results(
+            [TweetId(id)],
+            HashMap::from([(TweetId(id), Ok::<_, anyhow::Error>(None))]),
+        )
+    }
+
+    fn failed_edit_control(id: u64) -> TweetHydrationBatch<EditControl> {
+        TweetHydrationBatch::from_results(
+            [TweetId(id)],
+            HashMap::from([(
+                TweetId(id),
+                Err::<Option<EditControl>, _>("tes unavailable"),
+            )]),
+        )
+    }
+
+    #[test]
+    fn edit_control_lookup_failed_is_false_when_found_or_not_found() {
+        let found = TweetHydration {
+            edit_control: found_edit_control(10),
+            ..Default::default()
+        };
+        let not_found = TweetHydration {
+            edit_control: not_found_edit_control(10),
+            ..Default::default()
+        };
+
+        assert!(!found.edit_control_lookup_failed(TweetId(10)));
+        assert!(!not_found.edit_control_lookup_failed(TweetId(10)));
+        assert!(!TweetHydration::default().edit_control_lookup_failed(TweetId(10)));
+    }
+
+    #[test]
+    fn assemble_collapses_failed_edit_control_to_none() {
+        let candidates = vec![candidate(10, 100)];
+        let core_datas = HashMap::from([(
+            TweetId(10),
+            PureCoreData {
+                author_id: 100,
+                ..Default::default()
+            },
+        )]);
+        let tweet_keyed = TweetHydration {
+            edit_control: failed_edit_control(10),
+            ..Default::default()
+        };
+
+        let features = hydrator().assemble_tweet_features(&candidates, &core_datas, &tweet_keyed);
+
+        assert!(features[&TweetId(10)].edit_control.is_none());
+    }
+
+    #[test]
+    fn failed_edit_control_lookup_is_edit_failure() {
+        let keyed = TweetHydration {
+            edit_control: failed_edit_control(10),
+            ..Default::default()
+        };
+
+        assert!(keyed.edit_control_lookup_failed(TweetId(10)));
+        assert!(!keyed.edit_control_lookup_failed(TweetId(11)));
+    }
+
+    #[test]
+    fn timed_out_edit_control_batch_is_edit_failure() {
+        let keyed = TweetHydration {
+            edit_control: TweetHydrationBatch::timed_out([TweetId(10)]),
+            ..Default::default()
+        };
+
+        assert!(keyed.edit_control_lookup_failed(TweetId(10)));
+    }
+
+    #[test]
+    fn retain_drops_only_ids_whose_edit_control_rpc_failed() {
+        let keyed = TweetHydration {
+            edit_control: TweetHydrationBatch::from_results(
+                [TweetId(10), TweetId(11), TweetId(12)],
+                HashMap::from([
+                    (
+                        TweetId(10),
+                        Err::<Option<EditControl>, _>("tes unavailable"),
+                    ),
+                    (TweetId(11), Ok::<_, anyhow::Error>(None)),
+                    (
+                        TweetId(12),
+                        Ok::<_, anyhow::Error>(Some(EditControl::Initial(Default::default()))),
+                    ),
+                ]),
+            ),
+            ..Default::default()
+        };
+        let kept = retain_candidates_with_usable_edit_control(
+            vec![candidate(10, 100), candidate(11, 100), candidate(12, 100)],
+            &keyed,
+        );
+
+        assert_eq!(
+            kept.iter().map(|c| c.tweet_id.0).collect::<Vec<_>>(),
+            vec![11, 12]
+        );
     }
 }

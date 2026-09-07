@@ -25,7 +25,7 @@ use safety_label_hydrator::{SafetyLabelHydration, SafetyLabelHydrator};
 use socialgraph_hydrator::SocialgraphHydrator;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tes_hydrator::TesHydrator;
+use tes_hydrator::{retain_candidates_with_usable_edit_control, TesHydrator};
 use viewer_hydrator::ViewerHydrator;
 use xai_core_entities::gizmoduck_client::GizmoduckClient;
 use xai_core_entities::tweet_entity_service_client::TESClient;
@@ -207,6 +207,8 @@ impl HydrationPipeline {
                 label_response,
             } = safety_labels;
 
+            let candidates =
+                retain_candidates_with_usable_edit_control(candidates, &tes_tweet_keyed);
             let tweet_features = self.tes_hydrator.assemble_tweet_features(
                 &candidates,
                 &core_datas,
