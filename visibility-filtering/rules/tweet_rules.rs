@@ -228,7 +228,9 @@ fn sensitive_viewer_logged_out(context: &RuleContext<'_>) -> VfAction {
 }
 
 fn sensitive_viewer_underage(context: &RuleContext<'_>) -> VfAction {
-    if context.viewer().is_underage() && sensitive_base_condition(context) {
+    if (context.viewer().is_underage() || context.viewer().age_lookup_failed())
+        && sensitive_base_condition(context)
+    {
         VfAction::Drop(FilteredReason::ContainNsfwMedia)
     } else {
         VfAction::Allow
@@ -679,6 +681,23 @@ mod tests {
         assert_allows(no_age, &gating_viewer(ViewerAge::Unknown), &hp);
         assert_allows(underage, &gating_viewer(ViewerAge::Unknown), &text);
         assert_allows(no_age, &gating_viewer(ViewerAge::Unknown), &text);
+
+        for firing in sensitive_firing_candidates() {
+            assert_drops(
+                underage,
+                &gating_viewer(ViewerAge::LookupFailed),
+                &firing,
+                &reason,
+            );
+        }
+        assert_allows(no_age, &gating_viewer(ViewerAge::LookupFailed), &hp);
+        let us_failed = ViewerFeatures {
+            country_code: Some("us".into()),
+            ..gating_viewer(ViewerAge::LookupFailed)
+        };
+        assert_drops(underage, &us_failed, &text, &reason);
+        let clean = candidate().build();
+        assert_allows(underage, &gating_viewer(ViewerAge::LookupFailed), &clean);
 
         let opted_in = ViewerFeatures {
             allows_sensitive_media: true,

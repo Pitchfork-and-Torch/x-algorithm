@@ -20,6 +20,9 @@ pub const ADULT_AGE_YEARS: i32 = 18;
 pub enum ViewerAge {
     Known(i32),
     NotStated,
+    /// Gizmoduck viewer RPC errored or timed out. Distinct from `Unknown`
+    /// (no such user) so age gates can fail closed instead of serving NSFW.
+    LookupFailed,
     #[default]
     Unknown,
 }
@@ -40,6 +43,13 @@ impl ViewerFeatures {
 
     pub fn viewer_has_no_stated_age(&self) -> bool {
         matches!(self.viewer, Viewer::LoggedIn(_)) && self.viewer_age == ViewerAge::NotStated
+    }
+
+    /// Viewer age could not be confirmed because gizmoduck failed. Sensitive
+    /// media must hard-drop globally (same sink as underage), not fail open
+    /// as `Unknown` and not jurisdiction-scope as `NotStated`.
+    pub fn viewer_age_lookup_failed(&self) -> bool {
+        matches!(self.viewer, Viewer::LoggedIn(_)) && self.viewer_age == ViewerAge::LookupFailed
     }
 }
 
