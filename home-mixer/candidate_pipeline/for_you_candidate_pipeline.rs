@@ -3,6 +3,7 @@ use crate::clients::past_request_timestamps_client::{
     MockPastRequestTimestampsClient, PastRequestTimestampsClient, ProdPastRequestTimestampsClient,
 };
 use crate::clients::prompts_client::{MockPromptsClient, ProdPromptsClient, PromptsClient};
+use crate::clients::s2s::{S2S_CHAIN_PATH, S2S_CRT_PATH, S2S_KEY_PATH};
 use crate::clients::served_history_client::{
     MockServedHistoryClient, ProdServedHistoryClient, ServedHistoryClient,
 };
@@ -14,6 +15,8 @@ use crate::filters::ad_adjacent_served_filter::AdAdjacentServedFilter;
 use crate::filters::push_to_home_dedup_filter::PushToHomeDedupFilter;
 use crate::models::query::ScoredPostsQuery;
 use crate::params;
+use crate::query_hydrators::blocked_user_ids_query_hydrator::BlockedUserIdsQueryHydrator;
+use crate::query_hydrators::muted_user_ids_query_hydrator::MutedUserIdsQueryHydrator;
 use crate::query_hydrators::past_request_timestamps_query_hydrator::PastRequestTimestampsQueryHydrator;
 use crate::query_hydrators::served_history_query_hydrator::ServedHistoryQueryHydrator;
 use crate::scored_posts_server::ScoredPostsServer;
@@ -41,8 +44,8 @@ use xai_candidate_pipeline::component_library::clients::kafka_publisher_client::
     KafkaPublisherClient, MockKafkaPublisherClient,
 };
 use xai_candidate_pipeline::component_library::clients::{
-    MockReplyMixerClient, MockStratoClient, ProdReplyMixerClient, ProdStratoClient,
-    ReplyMixerClient, StratoClient,
+    MockReplyMixerClient, MockSocialGraphClient, MockStratoClient, ProdReplyMixerClient,
+    ProdStratoClient, ReplyMixerClient, SocialGraphClient, SocialGraphClientOps, StratoClient,
 };
 use xai_candidate_pipeline::filter::Filter;
 use xai_candidate_pipeline::hydrator::Hydrator;
@@ -83,6 +86,7 @@ impl ForYouCandidatePipeline {
             tes_client,
             reply_mixer_client,
             strato_client,
+            socialgraph_client,
         ) = tokio::join!(
             async {
                 Arc::new(
@@ -145,6 +149,18 @@ impl ForYouCandidatePipeline {
                         .expect("Failed to create Strato client"),
                 ) as Arc<dyn StratoClient + Send + Sync>
             },
+            async {
+                Arc::new(
+                    SocialGraphClient::new(
+                        datacenter,
+                        &S2S_CHAIN_PATH,
+                        &S2S_CRT_PATH,
+                        &S2S_KEY_PATH,
+                    )
+                    .await
+                    .expect("Failed to create flock SocialGraphClient"),
+                ) as Arc<dyn SocialGraphClientOps>
+            },
         );
 
         Self::build(
@@ -162,6 +178,7 @@ impl ForYouCandidatePipeline {
             past_request_timestamps_client,
             tes_client,
             reply_mixer_client,
+            socialgraph_client,
         )
     }
 
@@ -181,6 +198,7 @@ impl ForYouCandidatePipeline {
         past_request_timestamps_client: Arc<dyn PastRequestTimestampsClient>,
         tes_client: Arc<dyn TESClient + Send + Sync>,
         reply_mixer_client: Arc<dyn ReplyMixerClient>,
+        socialgraph_client: Arc<dyn SocialGraphClientOps>,
     ) -> Self {
         let query_hydrators: Vec<Box<dyn QueryHydrator<ScoredPostsQuery>>> = vec![
             Box::new(ServedHistoryQueryHydrator::from_client(Arc::clone(
@@ -189,6 +207,12 @@ impl ForYouCandidatePipeline {
             Box::new(PastRequestTimestampsQueryHydrator::new(Arc::clone(
                 &past_request_timestamps_client,
             ))),
+            Box::new(BlockedUserIdsQueryHydrator {
+                socialgraph_client: socialgraph_client.clone(),
+            }),
+            Box::new(MutedUserIdsQueryHydrator {
+                socialgraph_client,
+            }),
         ];
 
         let sources: Vec<Box<dyn Source<ScoredPostsQuery, FeedItem>>> = vec![
@@ -263,6 +287,7 @@ impl ForYouCandidatePipeline {
         let reply_mixer_client: Arc<dyn ReplyMixerClient> = Arc::new(MockReplyMixerClient);
         let strato_client: Arc<dyn StratoClient + Send + Sync> =
             Arc::new(MockStratoClient::default());
+        let socialgraph_client: Arc<dyn SocialGraphClientOps> = Arc::new(MockSocialGraphClient);
         Self::build(
             scored_posts_server,
             strato_client,
@@ -278,6 +303,7 @@ impl ForYouCandidatePipeline {
             past_request_timestamps_client,
             tes_client,
             reply_mixer_client,
+            socialgraph_client,
         )
     }
 }
