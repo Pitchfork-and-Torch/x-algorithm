@@ -249,7 +249,25 @@ pub struct TakedownPredicates<'a> {
 impl TakedownPredicates<'_> {
     #[inline]
     pub fn legal_in_viewer_country(&self) -> bool {
-        self.in_viewer_country(legal_takedown_country)
+        let viewer_country = self.ctx.viewer.country_code.as_deref();
+        let reason_countries = self
+            .ctx
+            .candidate
+            .tweet_features
+            .takedown_reasons
+            .iter()
+            .filter_map(legal_takedown_country);
+        let withheld_in_countries = self
+            .ctx
+            .candidate
+            .tweet_features
+            .takedown_country_codes
+            .iter()
+            .map(String::as_str);
+        withheld_countries_apply(
+            viewer_country,
+            reason_countries.chain(withheld_in_countries),
+        )
     }
 
     #[inline]
@@ -259,18 +277,15 @@ impl TakedownPredicates<'_> {
 
     #[inline]
     fn in_viewer_country(&self, extractor: fn(&TakedownReason) -> Option<&str>) -> bool {
-        let viewer_country = self.ctx.viewer.country_code.as_deref();
-        self.ctx
-            .candidate
-            .tweet_features
-            .takedown_reasons
-            .iter()
-            .filter_map(extractor)
-            .any(|c| {
-                c.eq_ignore_ascii_case(WORLDWIDE_COUNTRY_CODE)
-                    || c.eq_ignore_ascii_case(WORLDWIDE_COPYRIGHT_COUNTRY_CODE)
-                    || viewer_country.is_some_and(|v| c.eq_ignore_ascii_case(v))
-            })
+        withheld_countries_apply(
+            self.ctx.viewer.country_code.as_deref(),
+            self.ctx
+                .candidate
+                .tweet_features
+                .takedown_reasons
+                .iter()
+                .filter_map(extractor),
+        )
     }
 
     #[inline]
@@ -290,6 +305,31 @@ impl TakedownPredicates<'_> {
 
 const WORLDWIDE_COUNTRY_CODE: &str = "xx";
 const WORLDWIDE_COPYRIGHT_COUNTRY_CODE: &str = "xy";
+
+fn withheld_countries_apply<'a>(
+    viewer_country: Option<&str>,
+    countries: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    let mut saw_country_scoped = false;
+    for raw in countries {
+        let country = if raw.is_empty() {
+            WORLDWIDE_COUNTRY_CODE
+        } else {
+            raw
+        };
+        if country.eq_ignore_ascii_case(WORLDWIDE_COUNTRY_CODE)
+            || country.eq_ignore_ascii_case(WORLDWIDE_COPYRIGHT_COUNTRY_CODE)
+        {
+            return true;
+        }
+        saw_country_scoped = true;
+        if viewer_country.is_some_and(|v| country.eq_ignore_ascii_case(v)) {
+            return true;
+        }
+    }
+    // Country-scoped withhold with no viewer country used to Allow (fail-open).
+    saw_country_scoped && viewer_country.is_none()
+}
 
 fn legal_takedown_country(reason: &TakedownReason) -> Option<&str> {
     match reason {

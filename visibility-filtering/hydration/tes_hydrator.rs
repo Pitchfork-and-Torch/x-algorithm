@@ -1,4 +1,4 @@
-use crate::hydration::batch::TweetHydrationBatch;
+use crate::hydration::batch::{Hydrated, TweetHydrationBatch};
 use crate::hydration::metrics::{record_batch_size, timed_keyed_rpc, timed_results};
 use crate::models::{
     CoreFeature, MediaFeature, NsfwFeature, TweetCandidateInput, TweetFeatures, TweetId,
@@ -12,6 +12,7 @@ use xai_core_entities::tweet_entity_service_client::TESClient;
 
 const CLIENT_TIMEOUT: Duration = Duration::from_millis(150);
 const CLIENT: &str = "tes";
+const WORLDWIDE_WITHHELD_COUNTRY: &str = "xx";
 
 pub struct TesHydrator {
     pub tes_client: Arc<dyn TESClient + Send + Sync>,
@@ -24,6 +25,7 @@ pub(crate) struct TweetHydration {
     pub(crate) nsfw_user: TweetHydrationBatch<bool>,
     pub(crate) nsfw_admin: TweetHydrationBatch<bool>,
     pub(crate) takedown_reasons: TweetHydrationBatch<Vec<TakedownReason>>,
+    pub(crate) takedown_country_codes: TweetHydrationBatch<Vec<String>>,
     pub(crate) edit_control: TweetHydrationBatch<EditControl>,
     pub(crate) media: TweetHydrationBatch<MediaFeature>,
 }
@@ -69,6 +71,7 @@ impl TesHydrator {
             nsfw_user,
             nsfw_admin,
             takedown_reasons,
+            takedown_country_codes,
             edit_control,
             media_entities,
         ) = tokio::join!(
@@ -114,6 +117,14 @@ impl TesHydrator {
             ),
             timed_results(
                 CLIENT,
+                "get_takedown_country_codes",
+                safety_level,
+                &candidate_count_by_key,
+                CLIENT_TIMEOUT,
+                self.tes_client.get_takedown_country_codes(raw_ids.clone()),
+            ),
+            timed_results(
+                CLIENT,
                 "get_edit_control",
                 safety_level,
                 &candidate_count_by_key,
@@ -136,6 +147,7 @@ impl TesHydrator {
             nsfw_user: nsfw_user.map_keys(TweetId),
             nsfw_admin: nsfw_admin.map_keys(TweetId),
             takedown_reasons: takedown_reasons.map_keys(TweetId),
+            takedown_country_codes: takedown_country_codes.map_keys(TweetId),
             edit_control: edit_control.map_keys(TweetId),
             media: media_entities.map_keys(TweetId).map(media_feature),
         }
@@ -178,6 +190,7 @@ fn build_tweet_features(
     let is_nullcast = tweet_keyed.nullcast.get(&id).copied().unwrap_or(false);
     let is_community_tweet = tweet_keyed.community.get(&id).is_some();
     let takedown_reasons = tweet_keyed.takedown_reasons.get_or_default(&id);
+    let takedown_country_codes = withheld_in_countries(&tweet_keyed.takedown_country_codes, &id);
     let nsfw = NsfwFeature {
         user: tweet_keyed.nsfw_user.get(&id).copied().unwrap_or(false),
         admin: tweet_keyed.nsfw_admin.get(&id).copied().unwrap_or(false),
@@ -193,12 +206,21 @@ fn build_tweet_features(
             },
             media,
             takedown_reasons,
+            takedown_country_codes,
             nsfw,
             is_nullcast,
             is_community_tweet,
             edit_control,
         })
         .unwrap_or_default()
+}
+
+fn withheld_in_countries(batch: &TweetHydrationBatch<Vec<String>>, id: &TweetId) -> Vec<String> {
+    match batch.hydrated(id) {
+        Some(Hydrated::Found(codes)) => codes.clone(),
+        Some(Hydrated::Failed(_)) => vec![WORLDWIDE_WITHHELD_COUNTRY.to_string()],
+        Some(Hydrated::NotFound) | None => Vec::new(),
+    }
 }
 
 fn media_feature(entities: MediaEntities) -> MediaFeature {
@@ -473,5 +495,59 @@ mod tests {
         let f = &features[&TweetId(10)];
         assert!(f.core.text.is_empty());
         assert!(!f.media.has_media);
+    }
+
+    fn failed<V>(id: u64) -> TweetHydrationBatch<V> {
+        TweetHydrationBatch::from_results(
+            [TweetId(id)],
+            HashMap::from([(TweetId(id), Err::<Option<V>, _>("tes unavailable"))]),
+        )
+    }
+
+    fn not_found<V>(id: u64) -> TweetHydrationBatch<V> {
+        TweetHydrationBatch::from_results(
+            [TweetId(id)],
+            HashMap::from([(TweetId(id), Ok::<Option<V>, _>(None))]),
+        )
+    }
+
+    fn assemble_with_country_codes(batch: TweetHydrationBatch<Vec<String>>) -> TweetFeatures {
+        let candidates = vec![candidate(10, 100)];
+        let core_datas = HashMap::from([(
+            TweetId(10),
+            PureCoreData {
+                author_id: 100,
+                ..Default::default()
+            },
+        )]);
+        hydrator()
+            .assemble_tweet_features(
+                &candidates,
+                &core_datas,
+                &TweetHydration {
+                    takedown_country_codes: batch,
+                    ..Default::default()
+                },
+            )
+            .remove(&TweetId(10))
+            .unwrap()
+    }
+
+    #[test]
+    fn assemble_keeps_found_withheld_in_countries() {
+        let f = assemble_with_country_codes(found(10, vec!["de".to_string(), "fr".to_string()]));
+        assert_eq!(f.takedown_country_codes, vec!["de", "fr"]);
+    }
+
+    #[test]
+    fn assemble_treats_missing_withheld_in_countries_as_empty() {
+        let f = assemble_with_country_codes(not_found(10));
+        assert!(f.takedown_country_codes.is_empty());
+    }
+
+    #[test]
+    fn assemble_fail_closes_withheld_in_countries_err_as_worldwide() {
+        let f = assemble_with_country_codes(failed(10));
+        assert_eq!(f.takedown_country_codes, vec!["xx"]);
     }
 }
