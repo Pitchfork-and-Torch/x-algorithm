@@ -1,11 +1,12 @@
 use crate::clients::gizmoduck_client::GizmoduckClient;
 use crate::models::candidate::PostCandidate;
 use crate::models::query::ScoredPostsQuery;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tonic::async_trait;
 use xai_candidate_pipeline::component_library::utils::{default_quick_cache, QuickCache};
 use xai_candidate_pipeline::hydrator::{CacheStore, CachedHydrator};
+use xai_core_entities::entities::GizmoduckUserResult;
 use xai_x_thrift::user_labels::LabelValue;
 
 pub struct GizmoduckCandidateHydrator {
@@ -21,6 +22,111 @@ impl GizmoduckCandidateHydrator {
             cache,
         }
     }
+}
+
+/// Store outcome for one requested account.
+///
+/// `Unknown` is a miss or a read error. Hydrator `Err` is dropped by
+/// `update_all`, so unknown trust must be written as fail-closed values on
+/// an `Ok` candidate or the post keeps empty NSFW/size fields and is scored
+/// as clean / size-neutral.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AuthorLookup {
+    Found {
+        followers_count: Option<i32>,
+        screen_name: Option<String>,
+        nsfw: bool,
+        nsfw_ads: bool,
+    },
+    ConfirmedMissing,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AuthorHydration {
+    pub author_followers_count: Option<i32>,
+    pub author_screen_name: Option<String>,
+    pub retweeted_screen_name: Option<String>,
+    pub nsfw_author: Option<bool>,
+    pub nsfw_author_ads: Option<bool>,
+}
+
+fn flag_from_lookup(lookup: &AuthorLookup, ads: bool) -> Option<bool> {
+    match lookup {
+        AuthorLookup::Found { nsfw, nsfw_ads, .. } => Some(if ads { *nsfw_ads } else { *nsfw }),
+        AuthorLookup::ConfirmedMissing => Some(false),
+        AuthorLookup::Unknown => None,
+    }
+}
+
+fn or_trust(
+    poster: &AuthorLookup,
+    original: Option<&AuthorLookup>,
+    quoted: Option<&AuthorLookup>,
+    ads: bool,
+) -> Option<bool> {
+    let mut known = false;
+    for lookup in [Some(poster), original, quoted].iter().copied().flatten() {
+        match flag_from_lookup(lookup, ads) {
+            None => return Some(true),
+            Some(true) => return Some(true),
+            Some(false) => known = true,
+        }
+    }
+    known.then_some(false)
+}
+
+/// Size and NSFW for one candidate.
+///
+/// Follower count is the content origin (`retweeted_user_id` when present).
+/// A small account amplifying a large original must not inherit the small
+/// account's size residual. Quotes stay on the quoter: a quote is new copy.
+///
+/// NSFW is the OR of poster, original author, and quoted author. A store miss
+/// or read error on any of those ids is labeled, not treated as clean.
+pub(crate) fn hydrate_author_features(
+    poster: AuthorLookup,
+    original: Option<AuthorLookup>,
+    quoted: Option<AuthorLookup>,
+) -> AuthorHydration {
+    let size_account = original.as_ref().unwrap_or(&poster);
+    let author_followers_count = match size_account {
+        AuthorLookup::Found {
+            followers_count, ..
+        } => *followers_count,
+        AuthorLookup::ConfirmedMissing | AuthorLookup::Unknown => None,
+    };
+    let author_screen_name = match &poster {
+        AuthorLookup::Found { screen_name, .. } => screen_name.clone(),
+        AuthorLookup::ConfirmedMissing | AuthorLookup::Unknown => None,
+    };
+    let retweeted_screen_name = match &original {
+        Some(AuthorLookup::Found { screen_name, .. }) => screen_name.clone(),
+        _ => None,
+    };
+
+    AuthorHydration {
+        author_followers_count,
+        author_screen_name,
+        retweeted_screen_name,
+        nsfw_author: or_trust(&poster, original.as_ref(), quoted.as_ref(), false),
+        nsfw_author_ads: or_trust(&poster, original.as_ref(), quoted.as_ref(), true),
+    }
+}
+
+fn user_ids_to_fetch(candidates: &[PostCandidate]) -> Vec<i64> {
+    candidates
+        .iter()
+        .flat_map(|c| {
+            [Some(c.author_id), c.retweeted_user_id, c.quoted_user_id]
+                .into_iter()
+                .flatten()
+                .filter(|&id| id != 0)
+                .map(|id| id as i64)
+        })
+        .collect::<HashSet<i64>>()
+        .into_iter()
+        .collect()
 }
 
 #[async_trait]
@@ -39,6 +145,7 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
         GizmoduckCacheKey {
             author_id: candidate.author_id,
             retweeted_user_id: candidate.retweeted_user_id,
+            quoted_user_id: candidate.quoted_user_id,
         }
     }
 
@@ -69,87 +176,32 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
         candidates: &[PostCandidate],
     ) -> Vec<Result<PostCandidate, String>> {
         let client = &self.gizmoduck_client;
-
-        let user_ids_to_fetch: Vec<i64> = candidates
-            .iter()
-            .map(|c| c.author_id as i64)
-            .chain(
-                candidates
-                    .iter()
-                    .filter_map(|c| c.retweeted_user_id)
-                    .map(|id| id as i64),
-            )
-            .collect::<HashSet<i64>>()
-            .into_iter()
-            .collect();
-
+        let user_ids_to_fetch = user_ids_to_fetch(candidates);
         let users = client.get_users(user_ids_to_fetch).await;
 
-        let mut hydrated_candidates = Vec::with_capacity(candidates.len());
-
-        for candidate in candidates {
-            let user = users.get(&(candidate.author_id as i64));
-            let user = match user {
-                Some(Ok(Some(user))) => Ok(Some(user)),
-                Some(Ok(None)) | None => Ok(None),
-                Some(Err(err)) => Err(err.to_string()),
-            };
-
-            let retweet_user = candidate
-                .retweeted_user_id
-                .and_then(|retweeted_user_id| users.get(&(retweeted_user_id as i64)));
-            let retweet_user = match retweet_user {
-                Some(Ok(Some(user))) => Ok(Some(user)),
-                Some(Ok(None)) | None => Ok(None),
-                Some(Err(err)) => Err(err.to_string()),
-            };
-
-            let hydrated = match (user, retweet_user) {
-                (Ok(user), Ok(retweet_user)) => {
-                    let user_counts = user.and_then(|user| user.user.as_ref().map(|u| &u.counts));
-                    let user_profile = user.and_then(|user| user.user.as_ref().map(|u| &u.profile));
-
-                    let author_followers_count: Option<i32> =
-                        user_counts.map(|x| x.followers_count).map(|x| x as i32);
-                    let author_screen_name: Option<String> =
-                        user_profile.map(|x| x.screen_name.clone());
-
-                    let retweet_profile =
-                        retweet_user.and_then(|user| user.user.as_ref().map(|u| &u.profile));
-                    let retweeted_screen_name: Option<String> =
-                        retweet_profile.map(|x| x.screen_name.clone());
-
-                    let author = user.and_then(|u| u.user.as_ref());
-                    let nsfw_author: Option<bool> = author.map(|u| {
-                        u.safety.nsfw_admin
-                            || u.safety.nsfw_user
-                            || u.labels
-                                .labels
-                                .iter()
-                                .any(|label| label.label_value == LabelValue::NSFW_HIGH_PRECISION.0)
-                    });
-                    let nsfw_author_ads: Option<bool> = author.map(|u| {
-                        nsfw_author.unwrap_or(false)
-                            || u.labels.labels.iter().any(|label| {
-                                label.label_value == LabelValue::POSSIBLY_NSFW_ACCOUNT.0
-                            })
-                    });
-
-                    Ok(PostCandidate {
-                        author_followers_count,
-                        author_screen_name,
-                        retweeted_screen_name,
-                        nsfw_author,
-                        nsfw_author_ads,
-                        ..Default::default()
-                    })
-                }
-                (Err(err), _) | (_, Err(err)) => Err(err),
-            };
-            hydrated_candidates.push(hydrated);
-        }
-
-        hydrated_candidates
+        candidates
+            .iter()
+            .map(|candidate| {
+                let poster = lookup_user(&users, candidate.author_id);
+                let original = candidate
+                    .retweeted_user_id
+                    .filter(|&id| id != 0)
+                    .map(|id| lookup_user(&users, id));
+                let quoted = candidate
+                    .quoted_user_id
+                    .filter(|&id| id != 0)
+                    .map(|id| lookup_user(&users, id));
+                let hydrated = hydrate_author_features(poster, original, quoted);
+                Ok(PostCandidate {
+                    author_followers_count: hydrated.author_followers_count,
+                    author_screen_name: hydrated.author_screen_name,
+                    retweeted_screen_name: hydrated.retweeted_screen_name,
+                    nsfw_author: hydrated.nsfw_author,
+                    nsfw_author_ads: hydrated.nsfw_author_ads,
+                    ..Default::default()
+                })
+            })
+            .collect()
     }
 
     fn update(&self, candidate: &mut PostCandidate, hydrated: PostCandidate) {
@@ -161,10 +213,47 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
     }
 }
 
+fn lookup_user<E>(
+    users: &HashMap<i64, Result<Option<GizmoduckUserResult>, E>>,
+    user_id: u64,
+) -> AuthorLookup {
+    match users.get(&(user_id as i64)) {
+        Some(Ok(Some(result))) => match result.user.as_ref() {
+            Some(user) => {
+                let nsfw = user.safety.nsfw_admin
+                    || user.safety.nsfw_user
+                    || user
+                        .labels
+                        .labels
+                        .iter()
+                        .any(|label| label.label_value == LabelValue::NSFW_HIGH_PRECISION.0);
+                let nsfw_ads = nsfw
+                    || user
+                        .labels
+                        .labels
+                        .iter()
+                        .any(|label| label.label_value == LabelValue::POSSIBLY_NSFW_ACCOUNT.0);
+                let followers_count = Some(user.counts.followers_count as i32);
+                let screen_name = Some(user.profile.screen_name.clone());
+                AuthorLookup::Found {
+                    followers_count,
+                    screen_name,
+                    nsfw,
+                    nsfw_ads,
+                }
+            }
+            None => AuthorLookup::ConfirmedMissing,
+        },
+        Some(Ok(None)) => AuthorLookup::ConfirmedMissing,
+        Some(Err(_)) | None => AuthorLookup::Unknown,
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct GizmoduckCacheKey {
     pub author_id: u64,
     pub retweeted_user_id: Option<u64>,
+    pub quoted_user_id: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -174,4 +263,134 @@ pub struct GizmoduckCacheValue {
     pub retweeted_screen_name: Option<String>,
     pub nsfw_author: Option<bool>,
     pub nsfw_author_ads: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn found(followers: i32, nsfw: bool, nsfw_ads: bool) -> AuthorLookup {
+        AuthorLookup::Found {
+            followers_count: Some(followers),
+            screen_name: Some(format!("u{followers}")),
+            nsfw,
+            nsfw_ads,
+        }
+    }
+
+    #[test]
+    fn retweet_uses_original_author_follower_count() {
+        let out = hydrate_author_features(
+            found(50, false, false),
+            Some(found(1_000_000, false, false)),
+            None,
+        );
+        assert_eq!(out.author_followers_count, Some(1_000_000));
+        assert_eq!(out.author_screen_name.as_deref(), Some("u50"));
+        assert_eq!(out.retweeted_screen_name.as_deref(), Some("u1000000"));
+        assert_eq!(out.nsfw_author, Some(false));
+    }
+
+    #[test]
+    fn original_post_uses_poster_follower_count() {
+        let out = hydrate_author_features(found(12_000, false, false), None, None);
+        assert_eq!(out.author_followers_count, Some(12_000));
+        assert_eq!(out.nsfw_author, Some(false));
+    }
+
+    #[test]
+    fn quote_keeps_quoter_follower_count() {
+        let out = hydrate_author_features(
+            found(80, false, false),
+            None,
+            Some(found(2_000_000, false, false)),
+        );
+        assert_eq!(out.author_followers_count, Some(80));
+        assert_eq!(out.nsfw_author, Some(false));
+    }
+
+    #[test]
+    fn nsfw_original_author_labels_retweet() {
+        let out = hydrate_author_features(
+            found(50, false, false),
+            Some(found(1_000_000, true, true)),
+            None,
+        );
+        assert_eq!(out.nsfw_author, Some(true));
+        assert_eq!(out.nsfw_author_ads, Some(true));
+        assert_eq!(out.author_followers_count, Some(1_000_000));
+    }
+
+    #[test]
+    fn nsfw_quoted_author_labels_quote() {
+        let out =
+            hydrate_author_features(found(80, false, false), None, Some(found(9, true, true)));
+        assert_eq!(out.author_followers_count, Some(80));
+        assert_eq!(out.nsfw_author, Some(true));
+    }
+
+    #[test]
+    fn store_miss_on_original_author_fails_closed() {
+        let out =
+            hydrate_author_features(found(50, false, false), Some(AuthorLookup::Unknown), None);
+        assert_eq!(out.nsfw_author, Some(true));
+        assert_eq!(out.nsfw_author_ads, Some(true));
+        assert_eq!(out.author_followers_count, None);
+    }
+
+    #[test]
+    fn store_miss_on_quoted_author_fails_closed() {
+        let out =
+            hydrate_author_features(found(80, false, false), None, Some(AuthorLookup::Unknown));
+        assert_eq!(out.nsfw_author, Some(true));
+        assert_eq!(out.author_followers_count, Some(80));
+    }
+
+    #[test]
+    fn store_miss_on_poster_fails_closed() {
+        let out = hydrate_author_features(AuthorLookup::Unknown, None, None);
+        assert_eq!(out.nsfw_author, Some(true));
+        assert_eq!(out.nsfw_author_ads, Some(true));
+        assert_eq!(out.author_followers_count, None);
+    }
+
+    #[test]
+    fn confirmed_missing_original_is_not_a_store_miss() {
+        let out = hydrate_author_features(
+            found(50, false, false),
+            Some(AuthorLookup::ConfirmedMissing),
+            None,
+        );
+        assert_eq!(out.nsfw_author, Some(false));
+        assert_eq!(out.author_followers_count, None);
+    }
+
+    #[test]
+    fn fetch_ids_include_retweeted_and_quoted_authors() {
+        let ids = user_ids_to_fetch(&[PostCandidate {
+            author_id: 1,
+            retweeted_user_id: Some(2),
+            quoted_user_id: Some(3),
+            ..Default::default()
+        }]);
+        let set: HashSet<i64> = ids.into_iter().collect();
+        assert_eq!(set, HashSet::from([1, 2, 3]));
+    }
+
+    #[test]
+    fn cache_key_includes_quoted_and_retweeted_ids() {
+        let key = GizmoduckCacheKey {
+            author_id: 1,
+            retweeted_user_id: Some(2),
+            quoted_user_id: Some(3),
+        };
+        assert_ne!(
+            key,
+            GizmoduckCacheKey {
+                author_id: 1,
+                retweeted_user_id: Some(2),
+                quoted_user_id: None,
+            }
+        );
+    }
 }
