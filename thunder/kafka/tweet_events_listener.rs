@@ -52,6 +52,30 @@ async fn monitor_partition_lag(
     }
 }
 
+/// TweetDeleteEvent removes the tweet that was actually deleted.
+/// QuotedTweetDeleteEvent is a quote-card update: the quoting post still
+/// exists. Using quoting_tweet_id here wipes live quotes from Thunder when
+/// the quoted original is deleted. TweetDeleteEvent already covers both
+/// the original and a quote that the author deleted.
+fn in_network_delete_post_id(
+    data: &TweetEventData,
+    now_secs: i64,
+    post_retention_sec: i64,
+) -> Option<i64> {
+    match data {
+        TweetEventData::TweetDeleteEvent(delete_event) => {
+            let tweet = delete_event.tweet.as_ref()?;
+            let created_at_secs = tweet.core_data.as_ref()?.created_at_secs?;
+            if now_secs - created_at_secs > post_retention_sec {
+                return None;
+            }
+            tweet.id
+        }
+        TweetEventData::QuotedTweetDeleteEvent(_) => None,
+        _ => None,
+    }
+}
+
 fn is_eligible_video(tweet: &Tweet) -> bool {
     let Some(media) = tweet.media.as_ref() else {
         return false;
@@ -209,6 +233,11 @@ async fn process_message_batch(
     for tweet_event in results {
         let data = tweet_event.data.unwrap();
 
+        if let Some(post_id) = in_network_delete_post_id(&data, now_secs, post_retention_sec) {
+            delete_tweets.push(post_id);
+            continue;
+        }
+
         match data {
             TweetEventData::TweetCreateEvent(create_event) => {
                 first_post_id = create_event.tweet.as_ref().unwrap().id.unwrap();
@@ -243,26 +272,7 @@ async fn process_message_batch(
                     conversation_id: core_data.conversation_id,
                 });
             }
-            TweetEventData::TweetDeleteEvent(delete_event) => {
-                let created_at_secs = delete_event
-                    .tweet
-                    .as_ref()
-                    .unwrap()
-                    .core_data
-                    .as_ref()
-                    .unwrap()
-                    .created_at_secs
-                    .unwrap();
-                if now_secs - created_at_secs > post_retention_sec {
-                    continue;
-                }
-                delete_tweets.push(delete_event.tweet.as_ref().unwrap().id.unwrap());
-            }
-            TweetEventData::QuotedTweetDeleteEvent(delete_event) => {
-                delete_tweets.push(delete_event.quoting_tweet_id.unwrap());
-            }
-            _ => {
-            }
+            _ => {}
         }
     }
 
@@ -375,5 +385,48 @@ async fn process_tweet_events(
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::in_network_delete_post_id;
+    use crate::schema::tweet::{Tweet, TweetCoreData};
+    use crate::schema::tweet_events::{
+        QuotedTweetDeleteEvent, QuotedTweetTakedownEvent, TweetDeleteEvent, TweetEventData,
+    };
+
+    fn tweet_delete(tweet_id: i64, created_at_secs: i64) -> TweetEventData {
+        let core = TweetCoreData::new(10i64, created_at_secs, None, None, None, None);
+        let tweet = Tweet::new(tweet_id, core, None, None, None);
+        TweetEventData::TweetDeleteEvent(TweetDeleteEvent::new(tweet, None, None, None, None))
+    }
+
+    #[test]
+    fn tweet_delete_within_retention_emits_that_tweet_id() {
+        let data = tweet_delete(500, 1_000);
+        assert_eq!(in_network_delete_post_id(&data, 1_100, 200), Some(500));
+    }
+
+    #[test]
+    fn tweet_delete_past_retention_is_ignored() {
+        let data = tweet_delete(500, 1_000);
+        assert_eq!(in_network_delete_post_id(&data, 1_400, 200), None);
+    }
+
+    #[test]
+    fn quoted_tweet_delete_does_not_delete_the_quoting_post() {
+        let data = TweetEventData::QuotedTweetDeleteEvent(QuotedTweetDeleteEvent::new(
+            111i64, 1i64, 222i64, 2i64,
+        ));
+        assert_eq!(in_network_delete_post_id(&data, 1_100, 200), None);
+    }
+
+    #[test]
+    fn quoted_tweet_takedown_does_not_delete() {
+        let data = TweetEventData::QuotedTweetTakedownEvent(QuotedTweetTakedownEvent::new(
+            111i64, 1i64, 222i64, 2i64, None,
+        ));
+        assert_eq!(in_network_delete_post_id(&data, 1_100, 200), None);
     }
 }
