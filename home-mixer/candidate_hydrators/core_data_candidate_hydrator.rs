@@ -330,6 +330,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nightowl_original_still_skips_tes() {
+        let mut core_data = HashMap::new();
+        core_data.insert(
+            32,
+            Some(PureCoreData {
+                author_id: 10,
+                text: "tes text must not replace nightowl".into(),
+                ..Default::default()
+            }),
+        );
+        let h = hydrator(core_data).await;
+        let out = run(&h, vec![nightowl_original()]).await;
+        assert_eq!(out[0].tweet_text, "hello");
+    }
+
+    #[tokio::test]
     async fn tes_miss_keeps_nightowl_reply_ids() {
         let h = hydrator(HashMap::new()).await;
         let out = run(&h, vec![nightowl_reply()]).await;
