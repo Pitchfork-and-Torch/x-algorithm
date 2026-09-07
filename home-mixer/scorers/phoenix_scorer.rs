@@ -21,6 +21,18 @@ pub struct PhoenixScorer {
 }
 
 impl PhoenixScorer {
+    fn refuse_without_sequence(
+        query: &ScoredPostsQuery,
+        n: usize,
+    ) -> Option<Vec<Result<PostCandidate, String>>> {
+        query.scoring_sequence.is_none().then(|| {
+            vec![
+                Err("Phoenix scoring_sequence missing; refusing empty scores".to_string());
+                n
+            ]
+        })
+    }
+
     fn resolve_cluster(query: &ScoredPostsQuery) -> PhoenixCluster {
         let configured_cluster =
             PhoenixCluster::parse(&query.params.get(PhoenixInferenceClusterId));
@@ -85,9 +97,12 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for PhoenixScorer {
             ProductSurface::HomeTimelineRanking
         };
 
-        if query.scoring_sequence.is_none() {
-            return vec![Ok(PostCandidate::default()); candidates.len()];
-        };
+        // Fail closed: stamping Default phoenix_scores (all None) plus
+        // last_scored_at_ms lets RankingScorer invent NEGATIVE_SCORES_OFFSET
+        // and TopK keep the post. update_all skips Err.
+        if let Some(refused) = Self::refuse_without_sequence(query, candidates.len()) {
+            return refused;
+        }
 
         let cluster = Self::resolve_cluster(query);
         let request = build_prediction_request(query, candidates, product_surface);
@@ -127,5 +142,34 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for PhoenixScorer {
         candidate.prediction_request_id = scored.prediction_request_id;
         candidate.last_scored_at_ms = scored.last_scored_at_ms;
         candidate.reranker_head_tag = scored.reranker_head_tag;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::query::ScoredPostsQuery;
+
+    #[test]
+    fn missing_scoring_sequence_is_err_not_empty_ok() {
+        let query = ScoredPostsQuery::default();
+        assert!(query.scoring_sequence.is_none());
+        let refused = PhoenixScorer::refuse_without_sequence(&query, 2).expect("must refuse");
+        assert_eq!(refused.len(), 2);
+        assert!(refused[0].is_err());
+        assert!(refused[1].is_err());
+        assert!(refused[0]
+            .as_ref()
+            .unwrap_err()
+            .contains("scoring_sequence missing"));
+    }
+
+    #[test]
+    fn present_scoring_sequence_does_not_refuse() {
+        let query = ScoredPostsQuery {
+            scoring_sequence: Some(xai_recsys_proto::UserActionSequence::default()),
+            ..Default::default()
+        };
+        assert!(PhoenixScorer::refuse_without_sequence(&query, 1).is_none());
     }
 }
