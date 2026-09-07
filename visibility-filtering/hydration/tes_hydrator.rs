@@ -1,4 +1,4 @@
-use crate::hydration::batch::TweetHydrationBatch;
+use crate::hydration::batch::{Hydrated, TweetHydrationBatch};
 use crate::hydration::metrics::{record_batch_size, timed_keyed_rpc, timed_results};
 use crate::models::{
     CoreFeature, MediaFeature, NsfwFeature, TweetCandidateInput, TweetFeatures, TweetId,
@@ -7,7 +7,9 @@ use crate::rules::SafetyLevel;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use xai_core_entities::entities::{EditControl, MediaEntities, PureCoreData, TakedownReason};
+use xai_core_entities::entities::{
+    EditControl, MediaEntities, PureCoreData, TakedownReason, UrlEntities,
+};
 use xai_core_entities::tweet_entity_service_client::TESClient;
 
 const CLIENT_TIMEOUT: Duration = Duration::from_millis(150);
@@ -26,6 +28,44 @@ pub(crate) struct TweetHydration {
     pub(crate) takedown_reasons: TweetHydrationBatch<Vec<TakedownReason>>,
     pub(crate) edit_control: TweetHydrationBatch<EditControl>,
     pub(crate) media: TweetHydrationBatch<MediaFeature>,
+    pub(crate) urls: TweetHydrationBatch<UrlEntities>,
+}
+
+impl TweetHydration {
+    /// MediaEntity / UrlEntity slots that NSFW age-gating and author
+    /// interstitial read through `has_media()`. Found(empty) is a confirmed
+    /// no-media / no-card tweet. Media NotFound or Failed, and URL Failed,
+    /// must not assemble as has_media=false.
+    pub(crate) fn media_or_url_entity_unusable(&self, id: TweetId) -> bool {
+        media_entity_unusable(&self.media, id) || url_entity_unusable(&self.urls, id)
+    }
+}
+
+fn media_entity_unusable(batch: &TweetHydrationBatch<MediaFeature>, id: TweetId) -> bool {
+    match batch.hydrated(&id) {
+        Some(Hydrated::Found(_)) => false,
+        Some(Hydrated::NotFound) | Some(Hydrated::Failed(_)) | None => true,
+    }
+}
+
+fn url_entity_unusable(batch: &TweetHydrationBatch<UrlEntities>, id: TweetId) -> bool {
+    match batch.hydrated(&id) {
+        Some(Hydrated::Found(_)) | Some(Hydrated::NotFound) => false,
+        Some(Hydrated::Failed(_)) => true,
+        // Empty batch in unit tests that only set media. hydrate_tweets always
+        // fills this slot via from_results (missing key → Failed).
+        None => false,
+    }
+}
+
+pub(crate) fn retain_candidates_with_usable_media_or_url_entities(
+    candidates: Vec<TweetCandidateInput>,
+    tweet_keyed: &TweetHydration,
+) -> Vec<TweetCandidateInput> {
+    candidates
+        .into_iter()
+        .filter(|c| !tweet_keyed.media_or_url_entity_unusable(c.tweet_id))
+        .collect()
 }
 
 impl TesHydrator {
@@ -71,6 +111,7 @@ impl TesHydrator {
             takedown_reasons,
             edit_control,
             media_entities,
+            urls,
         ) = tokio::join!(
             timed_results(
                 CLIENT,
@@ -128,6 +169,14 @@ impl TesHydrator {
                 CLIENT_TIMEOUT,
                 self.tes_client.get_tweet_media_entities(raw_ids.clone()),
             ),
+            timed_results(
+                CLIENT,
+                "get_urls",
+                safety_level,
+                &candidate_count_by_key,
+                CLIENT_TIMEOUT,
+                self.tes_client.get_urls(raw_ids.clone()),
+            ),
         );
 
         TweetHydration {
@@ -138,6 +187,7 @@ impl TesHydrator {
             takedown_reasons: takedown_reasons.map_keys(TweetId),
             edit_control: edit_control.map_keys(TweetId),
             media: media_entities.map_keys(TweetId).map(media_feature),
+            urls: urls.map_keys(TweetId),
         }
     }
 
@@ -473,5 +523,137 @@ mod tests {
         let f = &features[&TweetId(10)];
         assert!(f.core.text.is_empty());
         assert!(!f.media.has_media);
+    }
+
+    fn found_empty_media(id: u64) -> TweetHydrationBatch<MediaFeature> {
+        found(id, media_feature(Vec::<MediaEntity>::new()))
+    }
+
+    fn not_found_media(id: u64) -> TweetHydrationBatch<MediaFeature> {
+        TweetHydrationBatch::from_results(
+            [TweetId(id)],
+            HashMap::from([(TweetId(id), Ok::<_, anyhow::Error>(None))]),
+        )
+    }
+
+    fn failed_media(id: u64) -> TweetHydrationBatch<MediaFeature> {
+        TweetHydrationBatch::from_results(
+            [TweetId(id)],
+            HashMap::from([(
+                TweetId(id),
+                Err::<Option<MediaFeature>, _>("tes unavailable"),
+            )]),
+        )
+    }
+
+    fn found_empty_urls(id: u64) -> TweetHydrationBatch<UrlEntities> {
+        found(id, UrlEntities::default())
+    }
+
+    fn not_found_urls(id: u64) -> TweetHydrationBatch<UrlEntities> {
+        TweetHydrationBatch::from_results(
+            [TweetId(id)],
+            HashMap::from([(TweetId(id), Ok::<_, anyhow::Error>(None))]),
+        )
+    }
+
+    fn failed_urls(id: u64) -> TweetHydrationBatch<UrlEntities> {
+        TweetHydrationBatch::from_results(
+            [TweetId(id)],
+            HashMap::from([(
+                TweetId(id),
+                Err::<Option<UrlEntities>, _>("tes unavailable"),
+            )]),
+        )
+    }
+
+    #[test]
+    fn found_empty_media_and_urls_are_usable() {
+        let keyed = TweetHydration {
+            media: found_empty_media(10),
+            urls: found_empty_urls(10),
+            ..Default::default()
+        };
+
+        assert!(!keyed.media_or_url_entity_unusable(TweetId(10)));
+        assert!(TweetHydration::default().media_or_url_entity_unusable(TweetId(10)));
+    }
+
+    #[test]
+    fn media_not_found_is_unusable() {
+        let keyed = TweetHydration {
+            media: not_found_media(10),
+            urls: found_empty_urls(10),
+            ..Default::default()
+        };
+
+        assert!(keyed.media_or_url_entity_unusable(TweetId(10)));
+        assert!(!keyed.media_or_url_entity_unusable(TweetId(11)));
+    }
+
+    #[test]
+    fn media_failed_is_unusable() {
+        let keyed = TweetHydration {
+            media: failed_media(10),
+            urls: found_empty_urls(10),
+            ..Default::default()
+        };
+
+        assert!(keyed.media_or_url_entity_unusable(TweetId(10)));
+    }
+
+    #[test]
+    fn url_not_found_is_usable_url_failed_is_not() {
+        let not_found = TweetHydration {
+            media: found_empty_media(10),
+            urls: not_found_urls(10),
+            ..Default::default()
+        };
+        let failed = TweetHydration {
+            media: found_empty_media(10),
+            urls: failed_urls(10),
+            ..Default::default()
+        };
+
+        assert!(!not_found.media_or_url_entity_unusable(TweetId(10)));
+        assert!(failed.media_or_url_entity_unusable(TweetId(10)));
+    }
+
+    #[test]
+    fn retain_drops_only_ids_whose_media_or_url_entity_is_unusable() {
+        let keyed = TweetHydration {
+            media: TweetHydrationBatch::from_results(
+                [TweetId(10), TweetId(11), TweetId(12)],
+                HashMap::from([
+                    (TweetId(10), Ok::<_, anyhow::Error>(None)),
+                    (
+                        TweetId(11),
+                        Ok(Some(media_feature(Vec::<MediaEntity>::new()))),
+                    ),
+                    (
+                        TweetId(12),
+                        Ok(Some(media_feature(vec![MediaEntity::default()]))),
+                    ),
+                ]),
+            ),
+            urls: TweetHydrationBatch::from_results(
+                [TweetId(10), TweetId(11), TweetId(12)],
+                HashMap::from([
+                    (TweetId(10), Ok::<_, anyhow::Error>(Some(UrlEntities::default()))),
+                    (TweetId(11), Ok(Some(UrlEntities::default()))),
+                    (TweetId(12), Ok(Some(UrlEntities::default()))),
+                ]),
+            ),
+            ..Default::default()
+        };
+        let kept = retain_candidates_with_usable_media_or_url_entities(
+            vec![candidate(10, 100), candidate(11, 100), candidate(12, 100)],
+            &keyed,
+        );
+
+        assert_eq!(
+            kept.iter().map(|c| c.tweet_id.0).collect::<Vec<_>>(),
+            vec![11, 12]
+        );
     }
 }
