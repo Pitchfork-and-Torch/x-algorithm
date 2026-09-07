@@ -84,10 +84,22 @@ class ModelsService(
 
         Future
           .collectToTry(result)
-          .map { responses: Seq[Try[PredictionResponse]] =>
-            responses
+          .flatMap { responses: Seq[Try[PredictionResponse]] =>
+            val successes = responses
               .filter { response => filterException(response, model) }
               .map { predictionResponseTry => predictionResponseTry.get().prediction }
+
+            // Attempted replicas that all fail must not become a successful empty
+            // score list: callers persist that as unlabeled / SFW.
+            if (result.nonEmpty && successes.isEmpty) {
+              val cause = responses
+                .collectFirst { case Throw(ex) => ex }
+                .getOrElse(new IllegalStateException(s"${model.name} produced no scores"))
+              stats.scope(model.name).counter("fail_closed").incr()
+              Future.exception(cause)
+            } else {
+              Future.value(successes)
+            }
           }
     }
   }

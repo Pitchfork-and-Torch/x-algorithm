@@ -4,6 +4,7 @@ import com.twitter.cortex_media_annotator.thriftscala.MediaModel
 import com.twitter.finagle.NoBrokersAvailableException
 import com.twitter.finagle.stats.NullStatsReceiver
 import com.twitter.media_understanding.model_proxy.clients.ModelClient
+import com.twitter.media_understanding.model_proxy.exception.GreyScaleImageException
 import com.twitter.media_understanding.model_proxy.model_descriptors.ModelDescriptor
 import com.twitter.media_understanding.model_proxy.model_descriptors.ModelDescriptorRegistry
 import com.twitter.mediaservices.commons.thriftscala.MediaCategory
@@ -88,7 +89,7 @@ class ModelsServiceSpec extends FunSuite with MockitoSugar with BeforeAndAfterEa
   }
 
   test(
-    "getPrediction returns empty list of response if all models in cluster throw PredictionException"
+    "getPrediction fails closed if all models in cluster throw PredictionException"
   ) {
     when(client_1.isAvailable)
       .thenReturn(true)
@@ -100,12 +101,13 @@ class ModelsServiceSpec extends FunSuite with MockitoSugar with BeforeAndAfterEa
     when(client_2.predictFromModel(mockAny[PredictionRequest]))
       .thenReturn(Future.exception(new PredictionServiceException("")))
 
-    val result = Await.result(deepBirdService.getPrediction(Some(mediaCategory), model, media))
-    assert(result.isEmpty)
+    intercept[PredictionServiceException] {
+      Await.result(deepBirdService.getPrediction(Some(mediaCategory), model, media))
+    }
   }
 
   test(
-    "getPrediction returns empty list of response if all models in cluster throw non fatal exceptions"
+    "getPrediction fails closed if all models in cluster throw non fatal exceptions"
   ) {
     when(client_1.isAvailable)
       .thenReturn(true)
@@ -117,8 +119,27 @@ class ModelsServiceSpec extends FunSuite with MockitoSugar with BeforeAndAfterEa
     when(client_2.predictFromModel(mockAny[PredictionRequest]))
       .thenReturn(Future.exception(new IllegalArgumentException()))
 
-    val result = Await.result(deepBirdService.getPrediction(Some(mediaCategory), model, media))
-    assert(result.isEmpty)
+    intercept[IllegalArgumentException] {
+      Await.result(deepBirdService.getPrediction(Some(mediaCategory), model, media))
+    }
+  }
+
+  test(
+    "getPrediction fails closed with GreyScaleImageException when every replica hits a greyscale decode error"
+  ) {
+    val grey = new PredictionServiceException(deepBirdService.greyScaleErrorString)
+    when(client_1.isAvailable)
+      .thenReturn(true)
+    when(client_2.isAvailable)
+      .thenReturn(true)
+    when(client_1.predictFromModel(mockAny[PredictionRequest]))
+      .thenReturn(Future.exception(grey))
+    when(client_2.predictFromModel(mockAny[PredictionRequest]))
+      .thenReturn(Future.exception(grey))
+
+    intercept[GreyScaleImageException] {
+      Await.result(deepBirdService.getPrediction(Some(mediaCategory), model, media))
+    }
   }
 
   test(
@@ -155,6 +176,8 @@ class ModelsServiceSpec extends FunSuite with MockitoSugar with BeforeAndAfterEa
     when(client_2.isAvailable)
       .thenReturn(false)
 
+    // Kill-switched / filtered-out replicas were never attempted, so empty is
+    // not a swallowed error.
     val result2 = Await.result(deepBirdService.getPrediction(Some(mediaCategory), model, media))
     assert(result2.isEmpty)
   }
