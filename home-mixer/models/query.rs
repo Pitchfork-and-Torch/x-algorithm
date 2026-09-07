@@ -75,6 +75,14 @@ pub struct ScoredPostsQuery {
     pub topic_ids: Vec<i64>,
     pub excluded_topic_ids: Vec<i64>,
     pub exclude_videos: bool,
+    /// Viewer content-control: hide replies on Following / Ranked Following / For You.
+    pub hide_replies: bool,
+    /// Viewer content-control: hide posts that contain links.
+    pub hide_links: bool,
+    /// Alternate proto name for hide-replies (Twitter API `exclude_replies`).
+    pub exclude_replies: bool,
+    /// Viewer content-control: hide retweets. Night Owl used to `include:retweets` always.
+    pub exclude_retweets: bool,
     #[serde(serialize_with = "serialize_in_network_replies")]
     pub in_network_replies: InNetworkReplies,
     pub viewer_minhash: Option<Vec<i64>>,
@@ -192,6 +200,10 @@ impl ScoredPostsQuery {
             topic_ids,
             excluded_topic_ids,
             exclude_videos,
+            hide_replies: false,
+            hide_links: false,
+            exclude_replies: false,
+            exclude_retweets: false,
             in_network_replies: Default::default(),
             viewer_minhash: None,
             ip_address,
@@ -241,6 +253,18 @@ impl ScoredPostsQuery {
 
     pub fn has_excluded_topics(&self) -> bool {
         !self.excluded_topic_ids.is_empty()
+    }
+
+    pub fn hides_replies(&self) -> bool {
+        self.hide_replies || self.exclude_replies
+    }
+
+    pub fn hides_links(&self) -> bool {
+        self.hide_links
+    }
+
+    pub fn hides_retweets(&self) -> bool {
+        self.exclude_retweets
     }
 }
 

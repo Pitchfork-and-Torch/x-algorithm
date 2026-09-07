@@ -54,6 +54,7 @@ use crate::filters::retweet_deduplication_filter::RetweetDeduplicationFilter;
 use crate::filters::self_tweet_filter::SelfTweetFilter;
 use crate::filters::topic_ids_filter::TopicIdsFilter;
 use crate::filters::vf_filter::VFFilter;
+use crate::filters::following_content_controls_filter::FollowingContentControlsFilter;
 use crate::filters::video_filter::VideoFilter;
 use crate::filters::viewer_muted_keyword_filter::ViewerMutedKeywordFilter;
 use crate::models::candidate::PostCandidate;
@@ -368,6 +369,7 @@ impl PhoenixCandidatePipeline {
             // OmarAzizSenador deleted his account at the time this code was written.
             Box::new(Brazil2026ElectionFilter),
             Box::new(VideoFilter),
+            Box::new(FollowingContentControlsFilter),
             Box::new(TopicIdsFilter),
             Box::new(NewUserMinEngagementFilter),
             Box::new(InventoryHoldoutFilter),
