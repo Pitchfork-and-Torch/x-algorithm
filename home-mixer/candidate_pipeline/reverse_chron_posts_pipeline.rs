@@ -3,8 +3,10 @@ use crate::candidate_hydrators::conversation_gap_ancestor_hydrator::Conversation
 use crate::candidate_hydrators::core_data_candidate_hydrator::CoreDataCandidateHydrator;
 use crate::candidate_hydrators::following_blocked_by_hydrator::FollowingBlockedByHydrator;
 use crate::candidate_hydrators::quoted_post_text_hydrator::QuotedPostTextHydrator;
+use crate::candidate_hydrators::retweeted_author_screen_name_hydrator::RetweetedAuthorScreenNameHydrator;
 use crate::candidate_hydrators::tweet_type_metrics_hydrator::TweetTypeMetricsHydrator;
 use crate::candidate_hydrators::vf_following_candidate_hydrator::VFFollowingCandidateHydrator;
+use crate::clients::gizmoduck_client::{GizmoduckClient, MockGizmoduckClient, ProdGizmoduckClient};
 use crate::clients::night_owl_client::{MockNightOwlClient, NightOwlClient, ProdNightOwlClient};
 use crate::clients::s2s::{S2S_CHAIN_PATH, S2S_CRT_PATH, S2S_KEY_PATH};
 use crate::clients::tweet_entity_service_client::{MockTESClient, ProdTESClient, TESClient};
@@ -56,6 +58,7 @@ impl ReverseChronPostsPipeline {
             xai_vf_client,
             vf_safety_labels_client,
             socialgraph_client,
+            gizmoduck_client,
         ) = tokio::join!(
             async {
                 Arc::new(
@@ -112,6 +115,17 @@ impl ReverseChronPostsPipeline {
                     .expect("Failed to create flock SocialGraphClient"),
                 ) as Arc<dyn SocialGraphClientOps>
             },
+            async {
+                Arc::new(
+                    ProdGizmoduckClient::new(
+                        None,
+                        datacenter,
+                        Some("home-mixer.prod".to_string()),
+                    )
+                    .await
+                    .expect("Failed to create Gizmoduck client"),
+                ) as Arc<dyn GizmoduckClient + Send + Sync>
+            },
         );
 
         Self::build(
@@ -121,6 +135,7 @@ impl ReverseChronPostsPipeline {
             xai_vf_client,
             vf_safety_labels_client,
             socialgraph_client,
+            gizmoduck_client,
         )
         .await
     }
@@ -133,6 +148,7 @@ impl ReverseChronPostsPipeline {
             Arc::new(MockVfClient) as Arc<dyn VfClient + Send + Sync>,
             Arc::new(MockTweetSafetyLabelClient) as Arc<dyn TweetSafetyLabelClient>,
             Arc::new(MockSocialGraphClient) as Arc<dyn SocialGraphClientOps>,
+            Arc::new(MockGizmoduckClient::default()) as Arc<dyn GizmoduckClient + Send + Sync>,
         )
         .await
     }
@@ -144,6 +160,7 @@ impl ReverseChronPostsPipeline {
         xai_vf_client: Arc<dyn VfClient + Send + Sync>,
         vf_safety_labels_client: Arc<dyn TweetSafetyLabelClient>,
         socialgraph_client: Arc<dyn SocialGraphClientOps>,
+        gizmoduck_client: Arc<dyn GizmoduckClient + Send + Sync>,
     ) -> Self {
         let sources: Vec<Box<dyn Source<ScoredPostsQuery, PostCandidate>>> =
             vec![Box::new(FollowingNightOwlSource {
@@ -156,6 +173,7 @@ impl ReverseChronPostsPipeline {
                 &tes_client,
             ))),
             Box::new(QuotedPostTextHydrator::new(tes_client)),
+            Box::new(RetweetedAuthorScreenNameHydrator::new(gizmoduck_client)),
         ];
 
         let filters: Vec<Box<dyn Filter<ScoredPostsQuery, PostCandidate>>> = vec![
