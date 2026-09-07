@@ -60,7 +60,7 @@ impl RecordProcessor for SidProcessor {
             let author_id = obj.author_id.unwrap_or(0);
             let index_name = obj.index_name.unwrap_or_default();
 
-            if post_id == 0 || author_id == 0 || index_name.is_empty() {
+            if !super::valid_index_ids(post_id, author_id) || index_name.is_empty() {
                 self.stats.total_invalid += 1;
                 continue;
             }
@@ -174,6 +174,7 @@ mod tests {
         let raw = vec![
             make_thrift_bytes(0, 10, "1fav"),
             make_thrift_bytes(100, 0, "1fav"),
+            make_thrift_bytes(100, -1, "1fav"),
             make_thrift_bytes(100, 10, ""),
         ];
         let results = process_in_blocking(move || proc.process_batch(&raw)).await;

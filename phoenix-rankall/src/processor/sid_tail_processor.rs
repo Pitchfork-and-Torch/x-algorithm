@@ -63,7 +63,7 @@ impl RecordProcessor for SidTailProcessor {
 
             let post_id = obj.post_id.unwrap_or(0);
             let author_id = obj.author_id.unwrap_or(0);
-            if post_id == 0 || author_id == 0 {
+            if !super::valid_index_ids(post_id, author_id) {
                 self.stats.total_invalid += 1;
                 continue;
             }
@@ -214,6 +214,19 @@ mod tests {
                 _ => panic!("expected Sid record"),
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn skips_nsfw_metadata_and_sentinel_author() {
+        let mut proc = make_processor(1000, 0);
+        let batch = vec![
+            make_bytes(1, 10, Some("nsfw_metadata"), 10, Some(5)),
+            make_bytes(2, -1, Some("metadata"), 10, Some(5)),
+            make_bytes(3, 30, Some("metadata"), 10, Some(5)),
+        ];
+        let out = process_in_blocking(move || proc.process_batch(&batch)).await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].post_id(), 3);
     }
 
     #[tokio::test(flavor = "multi_thread")]

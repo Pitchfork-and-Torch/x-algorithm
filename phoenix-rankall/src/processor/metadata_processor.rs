@@ -44,7 +44,7 @@ impl RecordProcessor for MetadataProcessor {
             let post_id = obj.post_id.unwrap_or(0);
             let author_id = obj.author_id.unwrap_or(0);
 
-            if post_id == 0 || author_id == 0 {
+            if !super::valid_index_ids(post_id, author_id) {
                 self.stats.total_invalid += 1;
                 continue;
             }
@@ -182,6 +182,20 @@ mod tests {
 
         let results = proc.process_batch(&raw);
         assert_eq!(results.len(), 1);
+        assert_eq!(proc.stats().total_invalid, 1);
+    }
+
+    #[test]
+    fn skips_sentinel_author_id() {
+        let mut proc = MetadataProcessor::new("metadata");
+        let raw = vec![
+            make_metadata_bytes(100, -1, "metadata", false, 0),
+            make_metadata_bytes(200, 20, "metadata", false, 0),
+        ];
+
+        let results = proc.process_batch(&raw);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].post_id(), 200);
         assert_eq!(proc.stats().total_invalid, 1);
     }
 

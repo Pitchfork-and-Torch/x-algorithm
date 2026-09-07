@@ -157,7 +157,7 @@ def hasVideo(mediaEntity: com.twitter.tweetypie.MediaEntity) : Boolean = {
 def isAuthorEligible(tweet: com.twitter.tweetypie.Tweet) : Boolean = {
   tweet.coreData.map {
     coreData => (coreData.nsfwUser == false) && (coreData.nsfwAdmin == false)
-  }.getOrElse(true)
+  }.getOrElse(false)
 }
 
 def isAuthorVisible(tweet: com.twitter.tweetypie.Tweet): Boolean = {
@@ -205,10 +205,12 @@ def getTweetypieResponse(tweetId: Long): TweetypieResponse = {
 }
 
 def getPostMetadataLightweight(postId: Long): Option[Tweet] = {
-  val (pureCoreDataOpt, mediaEntitiesOpt, communitiesOpt) = (
+  val (pureCoreDataOpt, mediaEntitiesOpt, communitiesOpt, nsfwUserOpt, nsfwAdminOpt) = (
     #Tweet<tweetypie/federated/pureCoreData>.fetch(postId, ()).v,
     #Tweet<tweetypie/federated/mediaEntities>.fetch(postId, ()).v,
-    #Tweet<tweetypie/federated/communities>.fetch(postId, ()).v
+    #Tweet<tweetypie/federated/communities>.fetch(postId, ()).v,
+    #Tweet<tweetypie/federated/nsfwUser>.fetch(postId, ()).v,
+    #Tweet<tweetypie/federated/nsfwAdmin>.fetch(postId, ()).v
   )
 
   pureCoreDataOpt.map { data =>
@@ -221,6 +223,8 @@ def getPostMetadataLightweight(postId: Long): Option[Tweet] = {
         createdVia = data.createdVia,
         reply = data.reply,
         share = data.share,
+        nsfwUser = nsfwUserOpt.getOrElse(false),
+        nsfwAdmin = nsfwAdminOpt.getOrElse(false),
       }: com.twitter.tweetypie.TweetCoreData),
       media = mediaEntitiesOpt,
       communities = communitiesOpt,
@@ -254,13 +258,17 @@ def shouldDropPostByVF(postId: Long): Boolean = {
       #<visibility/xai/shouldDropTweet>
         .fetch(postId, { safetyLevel = TimelineHomeRecommendations }).v
     } catch {
-      case _ => None
+      case _ => Some(true)
     }
-    verdictOpt.getOrElse(false)
+    verdictOpt.getOrElse(true)
   } else {
-    #Tweet<visibility/service/shouldDropTweetV2>
-      .fetch(postId, { safetyLevel = TimelineHomeRecommendations, forUserId = None }).v
-      .getOrElse(false)
+    val verdictOpt = try {
+      #Tweet<visibility/service/shouldDropTweetV2>
+        .fetch(postId, { safetyLevel = TimelineHomeRecommendations, forUserId = None }).v
+    } catch {
+      case _ => Some(true)
+    }
+    verdictOpt.getOrElse(true)
   }
 }
 
@@ -645,6 +653,7 @@ Library({
     isNsfwPost = isNsfwPost,
     isAuthorVisible = isAuthorVisible,
     isRepost = isRepost,
+    isAuthorEligible = isAuthorEligible,
     hasImmersiveVideo = hasImmersiveVideo,
     hasValidImmersiveVideo = hasValidImmersiveVideo,
     isImaginePost = isImaginePost,
