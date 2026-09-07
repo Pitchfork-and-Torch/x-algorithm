@@ -1,5 +1,5 @@
 use crate::clients::tweet_entity_service_client::TESClient;
-use crate::models::candidate::PostCandidate;
+use crate::models::candidate::{CandidateHelpers, PostCandidate};
 use crate::models::query::ScoredPostsQuery;
 use std::sync::Arc;
 use tonic::async_trait;
@@ -31,7 +31,7 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for SubscriptionHydrator {
         &self.cache
     }
     fn cache_key(&self, candidate: &PostCandidate) -> Self::CacheKey {
-        candidate.tweet_id
+        candidate.get_original_tweet_id()
     }
 
     fn cache_value(&self, hydrated: &PostCandidate) -> Self::CacheValue {
@@ -52,7 +52,7 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for SubscriptionHydrator {
     ) -> Vec<Result<PostCandidate, String>> {
         let client = &self.tes_client;
 
-        let tweet_ids: Vec<u64> = candidates.iter().map(|c| c.tweet_id).collect();
+        let tweet_ids = subscription_fetch_ids(candidates);
 
         let post_features = client.get_subscription_author_ids(tweet_ids.clone()).await;
 
@@ -78,5 +78,46 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for SubscriptionHydrator {
 
     fn update(&self, candidate: &mut PostCandidate, hydrated: PostCandidate) {
         candidate.subscription_author_id = hydrated.subscription_author_id;
+    }
+}
+
+fn subscription_fetch_ids(candidates: &[PostCandidate]) -> Vec<u64> {
+    candidates
+        .iter()
+        .map(|c| c.get_original_tweet_id())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_exclusive_still_uses_candidate_id() {
+        let candidates = vec![PostCandidate {
+            tweet_id: 20,
+            ..Default::default()
+        }];
+        assert_eq!(subscription_fetch_ids(&candidates), vec![20]);
+    }
+
+    #[test]
+    fn retweet_of_exclusive_uses_original_tweet_id() {
+        let candidates = vec![PostCandidate {
+            tweet_id: 10,
+            retweeted_tweet_id: Some(20),
+            ..Default::default()
+        }];
+        assert_eq!(subscription_fetch_ids(&candidates), vec![20]);
+    }
+
+    #[test]
+    fn wrapper_id_is_not_the_tes_key() {
+        let candidates = vec![PostCandidate {
+            tweet_id: 10,
+            retweeted_tweet_id: Some(20),
+            ..Default::default()
+        }];
+        assert_ne!(subscription_fetch_ids(&candidates), vec![10]);
     }
 }
