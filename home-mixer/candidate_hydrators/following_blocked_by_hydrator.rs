@@ -33,9 +33,19 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for FollowingBlockedByHydrator {
             .await
         {
             Ok(ids) => ids,
-            Err(e) => {
-                let err_msg = e.to_string();
-                return candidates.iter().map(|_| Err(err_msg.clone())).collect();
+            Err(_) => {
+                // Same as BlockedByHydrator: Err is skipped by update_all,
+                // and the filter treats None as not-blocked. Stamp true.
+                return candidates
+                    .iter()
+                    .map(|candidate| {
+                        Ok(PostCandidate {
+                            author_blocks_viewer: Some(true),
+                            quoted_author_blocks_viewer: candidate.quoted_user_id.map(|_| true),
+                            ..Default::default()
+                        })
+                    })
+                    .collect();
             }
         };
         candidates

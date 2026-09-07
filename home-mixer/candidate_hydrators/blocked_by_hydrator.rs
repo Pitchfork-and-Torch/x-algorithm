@@ -34,9 +34,19 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for BlockedByHydrator {
             .await
         {
             Ok(ids) => ids,
-            Err(e) => {
-                let err_msg = e.to_string();
-                return candidates.iter().map(|_| Err(err_msg.clone())).collect();
+            Err(_) => {
+                // Err is skipped by update_all, leaving author_blocks_viewer
+                // None. AuthorSocialgraphFilter then unwrap_or(false).
+                // Write Some(true) so the filter drops.
+                return candidates
+                    .iter()
+                    .map(|_| {
+                        Ok(PostCandidate {
+                            author_blocks_viewer: Some(true),
+                            ..Default::default()
+                        })
+                    })
+                    .collect();
             }
         };
         candidates
