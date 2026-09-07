@@ -90,12 +90,14 @@ impl Filter<ScoredPostsQuery, PostCandidate> for TopicIdsFilter {
             let mut excluded_expanded = TopicIdExpansion::expand(&excluded_ids);
             excluded_expanded.extend(&excluded_ids);
 
+            // Snooze is exclusion-only. Missing or empty topic hydration is
+            // not a match -- same safe harbor as bulk Explore unlabeled filler.
             let (new_kept, new_removed): (Vec<_>, Vec<_>) =
                 kept.into_iter().partition(|c| match &c.filtered_topic_ids {
                     Some(candidate_topics) if !candidate_topics.is_empty() => !candidate_topics
                         .iter()
                         .any(|tid| excluded_expanded.contains(tid)),
-                    _ => false,
+                    _ => true,
                 });
             kept = new_kept;
             removed.extend(new_removed);
@@ -1103,8 +1105,49 @@ mod tests {
         let result = TopicIdsFilter.filter(&query, candidates);
         let kept_ids: Vec<u64> = result.kept.iter().map(|c| c.tweet_id).collect();
         let removed_ids: Vec<u64> = result.removed.iter().map(|c| c.tweet_id).collect();
-        assert_eq!(kept_ids, vec![2]);
-        assert_eq!(removed_ids, vec![1, 3, 4]);
+        assert_eq!(kept_ids, vec![2, 3, 4]);
+        assert_eq!(removed_ids, vec![1]);
+    }
+
+    #[test]
+    fn test_excluded_topics_keeps_untagged_and_hydration_miss() {
+        let query = ScoredPostsQuery {
+            excluded_topic_ids: vec![TopicIdExpansion::XAI_SPORTS_REAL],
+            ..Default::default()
+        };
+
+        let candidates = vec![
+            PostCandidate {
+                tweet_id: 1,
+                filtered_topic_ids: None,
+                ..Default::default()
+            },
+            PostCandidate {
+                tweet_id: 2,
+                filtered_topic_ids: Some(vec![]),
+                ..Default::default()
+            },
+            PostCandidate {
+                tweet_id: 3,
+                filtered_topic_ids: Some(vec![TopicIdExpansion::XAI_SPORTS_REAL]),
+                ..Default::default()
+            },
+            PostCandidate {
+                tweet_id: 4,
+                filtered_topic_ids: Some(vec![TopicIdExpansion::XAI_AI]),
+                ..Default::default()
+            },
+        ];
+
+        let result = TopicIdsFilter.filter(&query, candidates);
+        let kept_ids: Vec<u64> = result.kept.iter().map(|c| c.tweet_id).collect();
+        let removed_ids: Vec<u64> = result.removed.iter().map(|c| c.tweet_id).collect();
+        assert_eq!(
+            kept_ids,
+            vec![1, 2, 4],
+            "hydration miss and known-untagged stay on For You snooze"
+        );
+        assert_eq!(removed_ids, vec![3]);
     }
 
     #[test]
@@ -1244,8 +1287,8 @@ mod tests {
 
         let result = TopicIdsFilter.filter(&query, candidates);
         let kept_ids: Vec<u64> = result.kept.iter().map(|c| c.tweet_id).collect();
-        assert_eq!(kept_ids, vec![3]);
-        assert_eq!(result.removed.len(), 3);
+        assert_eq!(kept_ids, vec![3, 4]);
+        assert_eq!(result.removed.len(), 2);
     }
 
     #[test]
