@@ -507,6 +507,29 @@ fn tweet_label_cases() -> Vec<Case> {
             expected_action: Drop(FilteredReason::PossiblyUndesirable),
             expected_decided_by: Some("FosnrCivicIntegrityDropRule"),
         },
+        Case {
+            name: "fosnr_civic_integrity_retweet_of_labeled_original_drops",
+            level: TimelineHome,
+            viewer: viewer(VIEWER_ID),
+            candidate: candidate()
+                .with_label(SafetyLabelType::FOSNR_CIVIC_INTEGRITY)
+                .retweet_of(99)
+                .followed()
+                .build(),
+            expected_action: Drop(FilteredReason::PossiblyUndesirable),
+            expected_decided_by: Some("FosnrCivicIntegrityDropRule"),
+        },
+        Case {
+            name: "fosnr_civic_integrity_retweet_of_labeled_original_drops_recs",
+            level: TimelineHomeRecommendations,
+            viewer: viewer(VIEWER_ID),
+            candidate: candidate()
+                .with_label(SafetyLabelType::FOSNR_CIVIC_INTEGRITY)
+                .retweet_of(99)
+                .build(),
+            expected_action: Drop(FilteredReason::PossiblyUndesirable),
+            expected_decided_by: Some("FosnrCivicIntegrityDropRule"),
+        },
     ]
 }
 

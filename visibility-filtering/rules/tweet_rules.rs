@@ -406,7 +406,42 @@ mod tests {
             } else {
                 assert_drops(spec, &author_viewer(), &firing, reason);
             }
+
+            let retweet = candidate()
+                .with_label(trigger_label(name))
+                .retweet_of(99)
+                .build();
+            assert_drops(spec, &viewer(VIEWER_ID), &retweet, reason);
         }
+    }
+
+    #[test]
+    fn civic_integrity_retweet_without_source_label_allows() {
+        let spec = TWEET_LABEL_DROPS
+            .iter()
+            .find(|s| s.name() == "FosnrCivicIntegrityDropRule")
+            .unwrap();
+        let wrapper_only = candidate().retweet_of(99).build();
+        assert_allows(spec, &viewer(VIEWER_ID), &wrapper_only);
+    }
+
+    #[test]
+    fn civic_integrity_retweet_with_source_label_drops() {
+        let spec = TWEET_LABEL_DROPS
+            .iter()
+            .find(|s| s.name() == "FosnrCivicIntegrityDropRule")
+            .unwrap();
+        let retweet = candidate()
+            .with_label(SafetyLabelType::FOSNR_CIVIC_INTEGRITY)
+            .retweet_of(99)
+            .followed()
+            .build();
+        assert_drops(
+            spec,
+            &viewer(VIEWER_ID),
+            &retweet,
+            &FilteredReason::PossiblyUndesirable,
+        );
     }
 
     #[test]
