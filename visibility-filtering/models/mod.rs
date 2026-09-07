@@ -119,6 +119,9 @@ impl HydratedTweetCandidate {
     }
 
     pub fn is_stale_tweet(&self) -> bool {
+        if self.tweet_features.edit_control_lookup_failed {
+            return true;
+        }
         let Some(ec) = &self.tweet_features.edit_control else {
             return false;
         };
@@ -127,13 +130,16 @@ impl HydratedTweetCandidate {
             xai_core_entities::entities::EditControl::Edit(edit) => {
                 match &edit.edit_control_initial {
                     Some(initial) => &initial.edit_tweet_ids,
-                    None => return false,
+                    // Missing initial ACL: cannot prove this version is current.
+                    None => return true,
                 }
             }
         };
-        edit_tweet_ids
-            .last()
-            .is_some_and(|&last| last != self.tweet_id)
+        match edit_tweet_ids.last() {
+            Some(&last) => last != self.tweet_id,
+            // Empty chain: cannot prove this version is current.
+            None => true,
+        }
     }
 }
 
@@ -266,6 +272,24 @@ mod tests {
     }
 
     #[test]
+    fn is_stale_tweet_when_edit_control_lookup_failed() {
+        let mut c = candidate();
+        c.tweet_features.edit_control_lookup_failed = true;
+        assert!(c.is_stale_tweet());
+    }
+
+    #[test]
+    fn is_stale_tweet_when_edit_chain_empty() {
+        use xai_core_entities::entities::{EditControl, EditControlInitial};
+        let mut c = candidate();
+        c.tweet_features.edit_control = Some(EditControl::Initial(EditControlInitial {
+            edit_tweet_ids: vec![],
+            ..Default::default()
+        }));
+        assert!(c.is_stale_tweet());
+    }
+
+    #[test]
     fn is_stale_tweet_edit_variant_superseded() {
         use xai_core_entities::entities::{EditControl, EditControlEdit, EditControlInitial};
         let mut c = HydratedTweetCandidate {
@@ -295,6 +319,6 @@ mod tests {
             initial_tweet_id: 10,
             edit_control_initial: None,
         }));
-        assert!(!c.is_stale_tweet());
+        assert!(c.is_stale_tweet());
     }
 }

@@ -1,4 +1,4 @@
-use crate::hydration::batch::TweetHydrationBatch;
+use crate::hydration::batch::{Hydrated, TweetHydrationBatch};
 use crate::hydration::metrics::{record_batch_size, timed_keyed_rpc, timed_results};
 use crate::models::{
     CoreFeature, MediaFeature, NsfwFeature, TweetCandidateInput, TweetFeatures, TweetId,
@@ -183,6 +183,10 @@ fn build_tweet_features(
         admin: tweet_keyed.nsfw_admin.get(&id).copied().unwrap_or(false),
     };
     let edit_control = tweet_keyed.edit_control.get(&id).cloned();
+    let edit_control_lookup_failed = matches!(
+        tweet_keyed.edit_control.hydrated(&id),
+        Some(Hydrated::Failed(_))
+    );
 
     core_datas
         .get(&tweet_id)
@@ -197,8 +201,12 @@ fn build_tweet_features(
             is_nullcast,
             is_community_tweet,
             edit_control,
+            edit_control_lookup_failed,
         })
-        .unwrap_or_default()
+        .unwrap_or(TweetFeatures {
+            edit_control_lookup_failed,
+            ..Default::default()
+        })
 }
 
 fn media_feature(entities: MediaEntities) -> MediaFeature {
@@ -473,5 +481,116 @@ mod tests {
         let f = &features[&TweetId(10)];
         assert!(f.core.text.is_empty());
         assert!(!f.media.has_media);
+    }
+
+    fn not_found_edit(id: u64) -> TweetHydrationBatch<EditControl> {
+        TweetHydrationBatch::from_results(
+            [TweetId(id)],
+            HashMap::from([(TweetId(id), Ok::<_, anyhow::Error>(None))]),
+        )
+    }
+
+    fn failed_edit(id: u64) -> TweetHydrationBatch<EditControl> {
+        TweetHydrationBatch::from_results(
+            [TweetId(id)],
+            HashMap::from([(
+                TweetId(id),
+                Err::<Option<EditControl>, _>("tes unavailable"),
+            )]),
+        )
+    }
+
+    fn current_edit(id: u64) -> TweetHydrationBatch<EditControl> {
+        found(
+            id,
+            EditControl::Initial(xai_core_entities::entities::EditControlInitial {
+                edit_tweet_ids: vec![id],
+                ..Default::default()
+            }),
+        )
+    }
+
+    #[test]
+    fn assemble_stamps_edit_control_lookup_failed_on_tes_err() {
+        let candidates = vec![candidate(10, 100)];
+        let core_datas = HashMap::from([(
+            TweetId(10),
+            PureCoreData {
+                author_id: 100,
+                ..Default::default()
+            },
+        )]);
+        let tweet_keyed = TweetHydration {
+            edit_control: failed_edit(10),
+            ..Default::default()
+        };
+
+        let features = hydrator().assemble_tweet_features(&candidates, &core_datas, &tweet_keyed);
+
+        assert!(features[&TweetId(10)].edit_control_lookup_failed);
+        assert!(features[&TweetId(10)].edit_control.is_none());
+    }
+
+    #[test]
+    fn assemble_does_not_stamp_edit_control_lookup_failed_on_not_found() {
+        let candidates = vec![candidate(10, 100)];
+        let core_datas = HashMap::from([(
+            TweetId(10),
+            PureCoreData {
+                author_id: 100,
+                ..Default::default()
+            },
+        )]);
+        let tweet_keyed = TweetHydration {
+            edit_control: not_found_edit(10),
+            ..Default::default()
+        };
+
+        let features = hydrator().assemble_tweet_features(&candidates, &core_datas, &tweet_keyed);
+
+        assert!(!features[&TweetId(10)].edit_control_lookup_failed);
+        assert!(features[&TweetId(10)].edit_control.is_none());
+    }
+
+    #[test]
+    fn assemble_keeps_found_edit_control_and_does_not_fail() {
+        let candidates = vec![candidate(10, 100)];
+        let core_datas = HashMap::from([(
+            TweetId(10),
+            PureCoreData {
+                author_id: 100,
+                ..Default::default()
+            },
+        )]);
+        let tweet_keyed = TweetHydration {
+            edit_control: current_edit(10),
+            ..Default::default()
+        };
+
+        let features = hydrator().assemble_tweet_features(&candidates, &core_datas, &tweet_keyed);
+
+        assert!(!features[&TweetId(10)].edit_control_lookup_failed);
+        assert!(features[&TweetId(10)].edit_control.is_some());
+    }
+
+    #[test]
+    fn assemble_stamps_edit_control_lookup_failed_when_core_missing() {
+        let candidates = vec![resolve_candidate(
+            &RawCandidate {
+                tweet_id: TweetId(10),
+                request_author_id: Some(100),
+            },
+            &HashMap::new(),
+        )
+        .unwrap()];
+        let tweet_keyed = TweetHydration {
+            edit_control: failed_edit(10),
+            ..Default::default()
+        };
+
+        let features =
+            hydrator().assemble_tweet_features(&candidates, &HashMap::new(), &tweet_keyed);
+
+        assert!(features[&TweetId(10)].edit_control_lookup_failed);
     }
 }

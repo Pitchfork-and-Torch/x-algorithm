@@ -546,6 +546,29 @@ fn tweet_shape_cases() -> Vec<Case> {
             expected_decided_by: Some("DropStaleTweetsRule"),
         },
         Case {
+            name: "stale_edit_control_lookup_failed_drops",
+            level: TimelineHome,
+            viewer: viewer(VIEWER_ID),
+            candidate: tweet_candidate(|t| t.edit_control_lookup_failed = true),
+            expected_action: Drop(FilteredReason::UnspecifiedReason),
+            expected_decided_by: Some("DropStaleTweetsRule"),
+        },
+        Case {
+            name: "stale_edit_control_missing_initial_drops",
+            level: TimelineHome,
+            viewer: viewer(VIEWER_ID),
+            candidate: tweet_candidate(|t| {
+                t.edit_control = Some(EditControl::Edit(
+                    xai_core_entities::entities::EditControlEdit {
+                        initial_tweet_id: 1,
+                        edit_control_initial: None,
+                    },
+                ))
+            }),
+            expected_action: Drop(FilteredReason::UnspecifiedReason),
+            expected_decided_by: Some("DropStaleTweetsRule"),
+        },
+        Case {
             name: "legal_takedown_drops_in_withheld_country",
             level: TimelineHome,
             viewer: viewer_in_country("us"),

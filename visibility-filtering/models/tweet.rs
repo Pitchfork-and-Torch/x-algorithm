@@ -31,4 +31,7 @@ pub struct TweetFeatures {
     pub is_nullcast: bool,
     pub is_community_tweet: bool,
     pub edit_control: Option<xai_core_entities::entities::EditControl>,
+    /// TES `get_edit_control` was Failed (timeout / RPC / missing id).
+    /// Distinct from `edit_control: None` (genuine NotFound: never edited).
+    pub edit_control_lookup_failed: bool,
 }
