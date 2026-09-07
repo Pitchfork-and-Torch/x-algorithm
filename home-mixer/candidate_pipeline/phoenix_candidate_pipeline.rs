@@ -324,12 +324,15 @@ impl PhoenixCandidatePipeline {
             cached_posts_source,
         ];
 
+        // InNetwork.apply_hydration reads author_id after CoreData.update.
+        // join_all hydrates every hydrator from the same snapshot, so vec
+        // order alone cannot give InNetwork the TES author (#128 leftover).
         let hydrators: Vec<Box<dyn Hydrator<ScoredPostsQuery, PostCandidate>>> = vec![
-            Box::new(InNetworkCandidateHydrator),
             Box::new(BidirectionalFollowHydrator {
                 socialgraph_client: socialgraph_client.clone(),
             }),
             Box::new(core_data_hydrator),
+            Box::new(InNetworkCandidateHydrator),
             Box::new(QuoteHydrator::new(tes_client.clone(), socialgraph_client.clone()).await),
             Box::new(MediaInfoHydrator::new(media_info_cache_client).await),
             Box::new(SubscriptionHydrator::new(tes_client.clone()).await),

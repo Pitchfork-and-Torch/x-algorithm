@@ -135,6 +135,8 @@ impl PhoenixScoresPipeline {
         let sources: Vec<Box<dyn Source<ScoredPostsQuery, PostCandidate>>> =
             vec![Box::new(SeedCandidatesSource)];
 
+        // CoreData.update before InNetwork.apply_hydration. join_all still
+        // hydrates both from the source snapshot; the stamp is the write-back.
         let hydrators: Vec<Box<dyn Hydrator<ScoredPostsQuery, PostCandidate>>> = vec![
             Box::new(CoreDataCandidateHydrator::new(tes_client.clone()).await),
             Box::new(InNetworkCandidateHydrator),
