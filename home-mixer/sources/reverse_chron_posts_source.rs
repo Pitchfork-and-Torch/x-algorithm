@@ -1,5 +1,4 @@
 use crate::candidate_pipeline::reverse_chron_posts_pipeline::ReverseChronPostsPipeline;
-use crate::models::brand_safety::BrandSafetyVerdict;
 use crate::models::candidate::{CandidateHelpers, PostCandidate};
 use crate::models::query::{FollowingPaginationMeta, ScoredPostsQuery};
 use crate::params::FOLLOWING_POST_FETCH_SIZE;
@@ -74,10 +73,33 @@ fn post_candidate_to_scored_post(candidate: &PostCandidate) -> ScoredPost {
         visibility_reason: candidate.visibility_reason.clone().map(|r| r.into()),
         tweet_type_metrics: Bytes::from(candidate.tweet_type_metrics.clone().unwrap_or_default()),
         following_replied_user_ids: candidate.following_replied_user_ids.clone(),
-        brand_safety_verdict: candidate
-            .brand_safety_verdict
-            .unwrap_or(BrandSafetyVerdict::MediumRisk) as i32,
+        brand_safety_verdict: crate::models::brand_safety::scored_post_verdict(
+            candidate.brand_safety_verdict,
+        ) as i32,
         tweet_text: candidate.tweet_text.clone(),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::brand_safety::BrandSafetyVerdict;
+    use xai_home_mixer_proto::BrandSafetyVerdict as ProtoVerdict;
+
+    #[test]
+    fn missing_ads_vf_verdict_does_not_become_medium_risk() {
+        let post = post_candidate_to_scored_post(&PostCandidate {
+            tweet_id: 7,
+            ..Default::default()
+        });
+        assert_eq!(
+            post.brand_safety_verdict,
+            ProtoVerdict::VerdictUnspecified as i32
+        );
+        assert_ne!(
+            post.brand_safety_verdict,
+            BrandSafetyVerdict::MediumRisk as i32
+        );
     }
 }

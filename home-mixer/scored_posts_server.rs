@@ -1,5 +1,4 @@
 use crate::candidate_pipeline::phoenix_candidate_pipeline::PhoenixCandidatePipeline;
-use crate::models::brand_safety::BrandSafetyVerdict;
 use crate::models::candidate::CandidateHelpers;
 use crate::models::candidate::PostCandidate;
 use crate::models::query::ScoredPostsQuery;
@@ -100,10 +99,9 @@ fn candidates_to_scored_posts(candidates: &[PostCandidate]) -> Vec<ScoredPost> {
                     candidate.tweet_type_metrics.clone().unwrap_or_default(),
                 ),
                 following_replied_user_ids: candidate.following_replied_user_ids.clone(),
-                brand_safety_verdict: candidate
-                    .brand_safety_verdict
-                    .unwrap_or(BrandSafetyVerdict::MediumRisk)
-                    as i32,
+                brand_safety_verdict: crate::models::brand_safety::scored_post_verdict(
+                    candidate.brand_safety_verdict,
+                ) as i32,
                 safety_label_types: candidate
                     .safety_labels
                     .iter()
@@ -230,4 +228,42 @@ fn safety_label_to_proto(label: SafetyLabelType) -> Option<i32> {
         _ => return None,
     };
     Some(v.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::brand_safety::BrandSafetyVerdict;
+    use xai_home_mixer_proto::BrandSafetyVerdict as ProtoVerdict;
+
+    #[test]
+    fn missing_ads_vf_verdict_serializes_as_unspecified() {
+        let scored = candidates_to_scored_posts(&[PostCandidate {
+            tweet_id: 1,
+            score: Some(10.0),
+            brand_safety_verdict: None,
+            ..Default::default()
+        }]);
+        assert_eq!(
+            scored[0].brand_safety_verdict,
+            ProtoVerdict::VerdictUnspecified as i32
+        );
+        assert_ne!(
+            scored[0].brand_safety_verdict,
+            BrandSafetyVerdict::MediumRisk as i32
+        );
+    }
+
+    #[test]
+    fn explicit_medium_risk_is_preserved() {
+        let scored = candidates_to_scored_posts(&[PostCandidate {
+            tweet_id: 1,
+            brand_safety_verdict: Some(BrandSafetyVerdict::MediumRisk),
+            ..Default::default()
+        }]);
+        assert_eq!(
+            scored[0].brand_safety_verdict,
+            BrandSafetyVerdict::MediumRisk as i32
+        );
+    }
 }

@@ -1,6 +1,6 @@
 use crate::models::brand_safety::{
     botmaker_rule_category, botmaker_rule_id_from, compute_verdict, compute_verdict_v2,
-    truncate_description, worst_verdict, BrandSafetyVerdict,
+    is_active_label, truncate_description, worst_verdict, BrandSafetyVerdict,
 };
 use crate::models::candidate::{PostCandidate, SafetyLabelInfo};
 use crate::models::query::ScoredPostsQuery;
@@ -10,21 +10,24 @@ use std::sync::Arc;
 use tonic::async_trait;
 use xai_candidate_pipeline::hydrator::Hydrator;
 use xai_safety_label_store::types::SafetyLabelMap;
-use xai_stats_receiver::global_stats_receiver;
 use xai_visibility_filtering::tweet_safety_label::TweetSafetyLabelClient;
 
-const NSFW_AUTHOR_METRIC: &str = "AdsBrandSafetyVf.nsfw_author";
-
+/// Tweet-label ads adjacency for organic posts. Ads-only author inventory
+/// (`nsfw_author_ads`) is not applied here: that flag is broader than organic
+/// NSFW and must not rewrite the verdict the For You blender uses to reorder.
 pub struct AdsBrandSafetyVfHydrator {
     pub client: Arc<dyn TweetSafetyLabelClient>,
 }
 
 fn to_safety_label_infos(labels: &SafetyLabelMap) -> impl Iterator<Item = SafetyLabelInfo> {
-    labels.iter().map(|(k, v)| SafetyLabelInfo {
-        label_type: *k,
-        description: v.source.as_deref().map(truncate_description),
-        source: botmaker_rule_id_from(v).map(|id| botmaker_rule_category(id).to_string()),
-    })
+    labels
+        .iter()
+        .filter(|(_, v)| is_active_label(v))
+        .map(|(k, v)| SafetyLabelInfo {
+            label_type: *k,
+            description: v.source.as_deref().map(truncate_description),
+            source: botmaker_rule_id_from(v).map(|id| botmaker_rule_category(id).to_string()),
+        })
 }
 
 #[async_trait]
@@ -61,9 +64,6 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for AdsBrandSafetyVfHydrator {
             compute_verdict
         };
 
-        let mut nsfw_author_seen: u64 = 0;
-        let mut nsfw_author_dropped: u64 = 0;
-
         let results: Vec<Result<PostCandidate, String>> = candidates
             .iter()
             .map(|c| {
@@ -99,15 +99,6 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for AdsBrandSafetyVfHydrator {
                     }
                 }
 
-                if c.nsfw_author_ads == Some(true) {
-                    nsfw_author_seen += 1;
-                    let before = verdict;
-                    verdict = worst_verdict(&verdict, &BrandSafetyVerdict::HighRisk);
-                    if verdict != before {
-                        nsfw_author_dropped += 1;
-                    }
-                }
-
                 safety_labels.sort_unstable_by_key(|l| i32::from(l.label_type));
                 safety_labels.dedup_by(|a, b| a.label_type == b.label_type);
 
@@ -118,19 +109,6 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for AdsBrandSafetyVfHydrator {
                 })
             })
             .collect();
-
-        if let Some(receiver) = global_stats_receiver() {
-            if nsfw_author_seen > 0 {
-                receiver.incr(NSFW_AUTHOR_METRIC, &[("outcome", "seen")], nsfw_author_seen);
-            }
-            if nsfw_author_dropped > 0 {
-                receiver.incr(
-                    NSFW_AUTHOR_METRIC,
-                    &[("outcome", "dropped")],
-                    nsfw_author_dropped,
-                );
-            }
-        }
 
         results
     }
@@ -481,7 +459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nsfw_author_escalates_to_high_risk() {
+    async fn nsfw_author_ads_does_not_escalate_organic_verdict() {
         let mut labels: SafetyLabelMap = HashMap::new();
         labels.insert(SafetyLabelType::GROK_SFA, SafetyLabel::default());
         let client = Arc::new(FakeVfClient {
@@ -504,7 +482,8 @@ mod tests {
         let hydrated = results[0].as_ref().unwrap();
         assert_eq!(
             hydrated.brand_safety_verdict,
-            Some(BrandSafetyVerdict::HighRisk)
+            Some(BrandSafetyVerdict::Safe),
+            "ads-only author inventory must not rewrite the organic brand-safety verdict"
         );
     }
 
@@ -534,5 +513,81 @@ mod tests {
             hydrated.brand_safety_verdict,
             Some(BrandSafetyVerdict::Safe)
         );
+    }
+
+    #[tokio::test]
+    async fn expired_community_note_does_not_keep_medium_risk() {
+        let mut labels: SafetyLabelMap = HashMap::new();
+        labels.insert(SafetyLabelType::GROK_SFA, SafetyLabel::default());
+        labels.insert(
+            SafetyLabelType::NSFA_COMMUNITY_NOTE,
+            SafetyLabel {
+                expires_at_msec: Some(1),
+                ..Default::default()
+            },
+        );
+        let client = Arc::new(FakeVfClient {
+            batch: SafetyLabelsBatch {
+                labels: HashMap::from([(1, labels)]),
+                failures: HashMap::new(),
+            },
+        });
+        let hydrator = AdsBrandSafetyVfHydrator { client };
+        let candidates = vec![PostCandidate {
+            tweet_id: 1,
+            ..Default::default()
+        }];
+
+        let results = hydrator
+            .hydrate(&ScoredPostsQuery::default(), &candidates)
+            .await;
+
+        let hydrated = results[0].as_ref().unwrap();
+        assert_eq!(
+            hydrated.brand_safety_verdict,
+            Some(BrandSafetyVerdict::Safe)
+        );
+        assert!(!hydrated
+            .safety_labels
+            .iter()
+            .any(|l| l.label_type == SafetyLabelType::NSFA_COMMUNITY_NOTE));
+    }
+
+    #[tokio::test]
+    async fn active_community_note_is_medium_risk_and_listed() {
+        let mut labels: SafetyLabelMap = HashMap::new();
+        labels.insert(SafetyLabelType::GROK_SFA, SafetyLabel::default());
+        labels.insert(
+            SafetyLabelType::NSFA_COMMUNITY_NOTE,
+            SafetyLabel {
+                expires_at_msec: Some(i64::MAX),
+                ..Default::default()
+            },
+        );
+        let client = Arc::new(FakeVfClient {
+            batch: SafetyLabelsBatch {
+                labels: HashMap::from([(1, labels)]),
+                failures: HashMap::new(),
+            },
+        });
+        let hydrator = AdsBrandSafetyVfHydrator { client };
+        let candidates = vec![PostCandidate {
+            tweet_id: 1,
+            ..Default::default()
+        }];
+
+        let results = hydrator
+            .hydrate(&ScoredPostsQuery::default(), &candidates)
+            .await;
+
+        let hydrated = results[0].as_ref().unwrap();
+        assert_eq!(
+            hydrated.brand_safety_verdict,
+            Some(BrandSafetyVerdict::MediumRisk)
+        );
+        assert!(hydrated
+            .safety_labels
+            .iter()
+            .any(|l| l.label_type == SafetyLabelType::NSFA_COMMUNITY_NOTE));
     }
 }
