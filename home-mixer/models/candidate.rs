@@ -47,6 +47,8 @@ pub struct PostCandidate {
     pub visibility_reason: Option<vf::FilteredReason>,
     pub drop_ancillary_posts: Option<bool>,
     pub subscription_author_id: Option<u64>,
+    #[serde(default)]
+    pub subscription_lookup_failed: Option<bool>,
     pub tweet_type_metrics: Option<Vec<u8>>,
     pub author_blocks_viewer: Option<bool>,
     pub quoted_author_blocks_viewer: Option<bool>,

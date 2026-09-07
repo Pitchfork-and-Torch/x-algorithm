@@ -102,6 +102,13 @@ impl<K: Eq + Hash, V> HydrationBatch<K, V> {
         }
     }
 
+    pub(crate) fn is_failed(&self, key: &K) -> bool {
+        match self.results.get(key) {
+            Some(hydrated) => hydrated.is_failed(),
+            None => true,
+        }
+    }
+
     pub(crate) fn hydrated(&self, key: &K) -> Option<&Hydrated<V>> {
         self.results.get(key)
     }
@@ -202,6 +209,10 @@ mod tests {
         );
         assert_eq!(batch.get_or_default(&2), 0);
         assert_eq!(batch.get_or_default(&3), 0);
+        assert!(!batch.is_failed(&1));
+        assert!(!batch.is_failed(&2));
+        assert!(batch.is_failed(&3));
+        assert!(batch.is_failed(&99));
     }
 
     #[test]

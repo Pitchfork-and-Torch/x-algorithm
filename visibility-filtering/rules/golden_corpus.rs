@@ -695,6 +695,19 @@ fn exclusive_content_cases() -> Vec<Case> {
             expected_action: Drop(FilteredReason::ExclusiveTweet),
             expected_decided_by: Some("DropExclusiveTweetContentRule"),
         },
+        Case {
+            name: "exclusive_tes_lookup_failed_drops",
+            level: TimelineHome,
+            viewer: viewer(VIEWER_ID),
+            candidate: {
+                let mut c = exclusive_candidate(false);
+                c.exclusive_content = None;
+                c.exclusive_hydration_failed = true;
+                c
+            },
+            expected_action: Drop(FilteredReason::ExclusiveTweet),
+            expected_decided_by: Some("DropExclusiveTweetContentRule"),
+        },
     ]
 }
 

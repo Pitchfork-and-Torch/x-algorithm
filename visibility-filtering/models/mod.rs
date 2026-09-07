@@ -72,6 +72,7 @@ pub struct HydratedTweetCandidate {
     pub safety_labels: SafetyLabelMap,
     pub relationship: ViewerAuthorRelationship,
     pub exclusive_content: Option<ExclusiveContentFeatures>,
+    pub exclusive_hydration_failed: bool,
 }
 
 impl HydratedTweetCandidate {
@@ -144,6 +145,7 @@ pub fn assemble(
     safety_labels: SafetyLabelMap,
     relationship: ViewerAuthorRelationship,
     exclusive_content: Option<ExclusiveContentFeatures>,
+    exclusive_hydration_failed: bool,
 ) -> HydratedTweetCandidate {
     HydratedTweetCandidate {
         tweet_id: candidate.tweet_id.0,
@@ -153,6 +155,7 @@ pub fn assemble(
         safety_labels,
         relationship,
         exclusive_content,
+        exclusive_hydration_failed,
     }
 }
 

@@ -19,14 +19,24 @@ impl Filter<ScoredPostsQuery, PostCandidate> for IneligibleSubscriptionFilter {
             .collect();
 
         let (kept, removed): (Vec<_>, Vec<_>) =
-            candidates
-                .into_iter()
-                .partition(|candidate| match candidate.subscription_author_id {
-                    Some(author_id) => subscribed_user_ids.contains(&author_id),
-                    None => true,
-                });
+            candidates.into_iter().partition(|candidate| {
+                keep_subscription_candidate(candidate, &subscribed_user_ids)
+            });
 
         FilterResult { kept, removed }
+    }
+}
+
+fn keep_subscription_candidate(
+    candidate: &PostCandidate,
+    subscribed_user_ids: &HashSet<u64>,
+) -> bool {
+    if candidate.subscription_lookup_failed == Some(true) {
+        return false;
+    }
+    match candidate.subscription_author_id {
+        Some(author_id) => subscribed_user_ids.contains(&author_id),
+        None => true,
     }
 }
 
@@ -65,5 +75,18 @@ mod tests {
             .removed
             .iter()
             .any(|c| c.subscription_author_id == Some(3)));
+    }
+
+    #[test]
+    fn tes_lookup_failure_drops_even_when_not_stamped_exclusive() {
+        let failed = PostCandidate {
+            subscription_author_id: None,
+            subscription_lookup_failed: Some(true),
+            ..Default::default()
+        };
+        let subscribed = HashSet::from([1u64, 2]);
+        assert!(!keep_subscription_candidate(&failed, &subscribed));
+        assert!(keep_subscription_candidate(&candidate(None), &subscribed));
+        assert!(keep_subscription_candidate(&candidate(Some(1)), &subscribed));
     }
 }
