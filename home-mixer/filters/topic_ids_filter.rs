@@ -29,6 +29,11 @@ impl Filter<ScoredPostsQuery, PostCandidate> for TopicIdsFilter {
                 let all_topic_ids = TopicIdExpansion::all_production_topic_ids();
                 let excluded: HashSet<i64> = all_topic_ids.difference(&expanded).copied().collect();
 
+                // Bulk Explore is an exclusion filter: keep posts whose known
+                // topics are not all outside the requested set. Missing topic
+                // hydration (None) must fail closed — otherwise withheld
+                // Sports/Politics/etc. posts still rank when Strato misses.
+                // Some([]) is a successful lookup with no topics (untagged).
                 let (kept, removed): (Vec<_>, Vec<_>) =
                     candidates
                         .into_iter()
@@ -36,7 +41,8 @@ impl Filter<ScoredPostsQuery, PostCandidate> for TopicIdsFilter {
                             Some(candidate_topics) if !candidate_topics.is_empty() => {
                                 !candidate_topics.iter().all(|tid| excluded.contains(tid))
                             }
-                            _ => true,
+                            Some(_) => true,
+                            None => false,
                         });
                 (kept, removed)
             } else {
@@ -881,8 +887,56 @@ mod tests {
         let result = TopicIdsFilter.filter(&query, candidates);
         let kept_ids: Vec<u64> = result.kept.iter().map(|c| c.tweet_id).collect();
         let removed_ids: Vec<u64> = result.removed.iter().map(|c| c.tweet_id).collect();
-        assert_eq!(kept_ids, vec![1, 3, 4, 6, 7]);
-        assert_eq!(removed_ids, vec![2, 5]);
+        assert_eq!(kept_ids, vec![1, 4, 6, 7]);
+        assert_eq!(removed_ids, vec![2, 3, 5]);
+    }
+
+    #[test]
+    fn test_bulk_explore_drops_hydration_miss_not_known_untagged() {
+        let query = ScoredPostsQuery {
+            topic_ids: vec![
+                TopicIdExpansion::XAI_NEWS,
+                TopicIdExpansion::BUSINESS_FINANCE,
+                TopicIdExpansion::SCIENCE_TECHNOLOGY,
+                TopicIdExpansion::XAI_MOVIES_TV,
+                TopicIdExpansion::XAI_AI,
+                TopicIdExpansion::XAI_GAMING,
+                TopicIdExpansion::XAI_CRYPTOCURRENCY,
+            ],
+            ..Default::default()
+        };
+
+        let candidates = vec![
+            PostCandidate {
+                tweet_id: 1,
+                filtered_topic_ids: None,
+                ..Default::default()
+            },
+            PostCandidate {
+                tweet_id: 2,
+                filtered_topic_ids: Some(vec![]),
+                ..Default::default()
+            },
+            PostCandidate {
+                tweet_id: 3,
+                filtered_topic_ids: Some(vec![TopicIdExpansion::XAI_SPORTS_REAL]),
+                ..Default::default()
+            },
+        ];
+
+        let result = TopicIdsFilter.filter(&query, candidates);
+        let kept_ids: Vec<u64> = result.kept.iter().map(|c| c.tweet_id).collect();
+        let removed_ids: Vec<u64> = result.removed.iter().map(|c| c.tweet_id).collect();
+        assert_eq!(
+            kept_ids,
+            vec![2],
+            "known-empty topic list is untagged For You filler"
+        );
+        assert_eq!(
+            removed_ids,
+            vec![1, 3],
+            "hydration miss and withheld Sports must not rank on Explore"
+        );
     }
 
     #[test]
