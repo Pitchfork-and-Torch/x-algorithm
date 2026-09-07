@@ -59,6 +59,36 @@ impl QuoteHydrator {
             .await
             .unwrap_or_default()
     }
+
+    async fn hydrate_cached_blocked_by(
+        &self,
+        query: &ScoredPostsQuery,
+        candidates: &[PostCandidate],
+    ) -> Vec<Result<PostCandidate, String>> {
+        let quoted_user_ids: Vec<u64> = candidates
+            .iter()
+            .filter_map(|c| c.quoted_user_id)
+            .collect::<HashSet<u64>>()
+            .into_iter()
+            .collect();
+        let blocked_by = self.get_blocked_by(query.user_id, quoted_user_ids).await;
+        candidates
+            .iter()
+            .map(|candidate| {
+                let quoted_author_blocks_viewer = candidate
+                    .quoted_user_id
+                    .map(|uid| blocked_by.contains(&uid))
+                    .unwrap_or(false);
+                Ok(PostCandidate {
+                    quoted_tweet_id: candidate.quoted_tweet_id,
+                    quoted_user_id: candidate.quoted_user_id,
+                    quoted_author_blocks_viewer: Some(quoted_author_blocks_viewer),
+                    quoted_video_duration_ms: candidate.quoted_video_duration_ms,
+                    ..Default::default()
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -69,8 +99,11 @@ pub struct QuoteCacheValue {
 
 #[async_trait]
 impl Hydrator<ScoredPostsQuery, PostCandidate> for QuoteHydrator {
-    fn enable(&self, query: &ScoredPostsQuery) -> bool {
-        !query.has_cached_posts
+    fn enable(&self, _query: &ScoredPostsQuery) -> bool {
+        // Cached posts already carry quoted_tweet_id / quoted_user_id.
+        // Skipping here keeps quoted_author_blocks_viewer from the Redis
+        // slate. A quoted author who newly blocks the viewer still serves.
+        true
     }
 
     async fn hydrate(
@@ -78,6 +111,10 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for QuoteHydrator {
         query: &ScoredPostsQuery,
         candidates: &[PostCandidate],
     ) -> Vec<Result<PostCandidate, String>> {
+        if query.has_cached_posts {
+            return self.hydrate_cached_blocked_by(query, candidates).await;
+        }
+
         let tweet_ids: Vec<u64> = candidates.iter().map(|c| c.tweet_id).collect();
 
         let mut cache_misses: Vec<u64> = Vec::new();
@@ -172,5 +209,129 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for QuoteHydrator {
         candidate.quoted_user_id = hydrated.quoted_user_id;
         candidate.quoted_author_blocks_viewer = hydrated.quoted_author_blocks_viewer;
         candidate.quoted_video_duration_ms = hydrated.quoted_video_duration_ms;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clients::tweet_entity_service_client::MockTESClient;
+    use tonic::Status;
+    use xai_candidate_pipeline::component_library::clients::SocialGraphClientOps;
+
+    struct MockSocialGraph {
+        blocked_by: HashSet<u64>,
+    }
+
+    #[async_trait]
+    impl SocialGraphClientOps for MockSocialGraph {
+        async fn get_following_list(&self, _user_id: u64) -> Result<Vec<u64>, Status> {
+            Ok(vec![])
+        }
+        async fn check_blocked_by(
+            &self,
+            _viewer_id: u64,
+            author_ids: &[u64],
+        ) -> Result<HashSet<u64>, Status> {
+            Ok(author_ids
+                .iter()
+                .copied()
+                .filter(|id| self.blocked_by.contains(id))
+                .collect())
+        }
+        async fn check_followed_by(
+            &self,
+            _viewer_id: u64,
+            _user_ids: &[u64],
+        ) -> Result<HashSet<u64>, Status> {
+            Ok(HashSet::new())
+        }
+        async fn get_blocked_user_ids(&self, _viewer_id: u64) -> Result<Vec<i64>, Status> {
+            Ok(vec![])
+        }
+        async fn get_muted_user_ids(&self, _viewer_id: u64) -> Result<Vec<i64>, Status> {
+            Ok(vec![])
+        }
+        async fn get_followed_user_ids(&self, _viewer_id: u64) -> Result<Vec<i64>, Status> {
+            Ok(vec![])
+        }
+        async fn get_follower_ids(&self, _user_id: u64) -> Result<Vec<i64>, Status> {
+            Ok(vec![])
+        }
+        async fn get_subscribed_user_ids(&self, _viewer_id: u64) -> Result<Vec<i64>, Status> {
+            Ok(vec![])
+        }
+        async fn get_device_following_user_ids(&self, _viewer_id: u64) -> Result<Vec<i64>, Status> {
+            Ok(vec![])
+        }
+        async fn get_hide_recommendations_user_ids(
+            &self,
+            _viewer_id: u64,
+        ) -> Result<Vec<i64>, Status> {
+            Ok(vec![])
+        }
+    }
+
+    fn hydrator(blocked_by: &[u64]) -> QuoteHydrator {
+        QuoteHydrator {
+            tes_client: Arc::new(MockTESClient::default()),
+            socialgraph_client: Arc::new(MockSocialGraph {
+                blocked_by: blocked_by.iter().copied().collect(),
+            }),
+            cache: default_quick_cache(),
+        }
+    }
+
+    fn query(has_cached_posts: bool) -> ScoredPostsQuery {
+        ScoredPostsQuery {
+            user_id: 1,
+            has_cached_posts,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn enable_on_cache_hit_and_miss() {
+        let hydrator = hydrator(&[]);
+        assert!(hydrator.enable(&query(true)));
+        assert!(hydrator.enable(&query(false)));
+    }
+
+    #[tokio::test]
+    async fn cache_hit_refreshes_quoted_blocked_by_and_keeps_ids() {
+        let hydrator = hydrator(&[200]);
+        let q = query(true);
+        let mut candidates = vec![
+            PostCandidate {
+                tweet_id: 1,
+                author_id: 10,
+                quoted_tweet_id: Some(11),
+                quoted_user_id: Some(200),
+                quoted_author_blocks_viewer: Some(false),
+                quoted_video_duration_ms: Some(1500),
+                ..Default::default()
+            },
+            PostCandidate {
+                tweet_id: 2,
+                author_id: 20,
+                quoted_tweet_id: Some(22),
+                quoted_user_id: Some(300),
+                quoted_author_blocks_viewer: Some(true),
+                ..Default::default()
+            },
+        ];
+
+        let hydrated = hydrator.hydrate(&q, &candidates).await;
+        for (c, h) in candidates.iter_mut().zip(hydrated) {
+            hydrator.update(c, h.expect("hydrate ok"));
+        }
+
+        assert_eq!(candidates[0].quoted_tweet_id, Some(11));
+        assert_eq!(candidates[0].quoted_user_id, Some(200));
+        assert_eq!(candidates[0].quoted_author_blocks_viewer, Some(true));
+        assert_eq!(candidates[0].quoted_video_duration_ms, Some(1500));
+        assert_eq!(candidates[1].quoted_tweet_id, Some(22));
+        assert_eq!(candidates[1].quoted_user_id, Some(300));
+        assert_eq!(candidates[1].quoted_author_blocks_viewer, Some(false));
     }
 }
