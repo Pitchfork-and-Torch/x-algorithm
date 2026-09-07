@@ -1,6 +1,6 @@
 use crate::models::brand_safety::{
-    botmaker_rule_category, botmaker_rule_id_from, compute_verdict, truncate_description,
-    worst_verdict, BrandSafetyVerdict,
+    botmaker_rule_category, botmaker_rule_id_from, compute_verdict, is_active_label,
+    truncate_description, worst_verdict, BrandSafetyVerdict,
 };
 use crate::models::candidate::{PostCandidate, SafetyLabelInfo};
 use crate::models::query::ScoredPostsQuery;
@@ -19,11 +19,14 @@ pub struct AdsBrandSafetyVfHydrator {
 }
 
 fn to_safety_label_infos(labels: &SafetyLabelMap) -> impl Iterator<Item = SafetyLabelInfo> {
-    labels.iter().map(|(k, v)| SafetyLabelInfo {
-        label_type: *k,
-        description: v.source.as_deref().map(truncate_description),
-        source: botmaker_rule_id_from(v).map(|id| botmaker_rule_category(id).to_string()),
-    })
+    labels
+        .iter()
+        .filter(|(_, v)| is_active_label(v))
+        .map(|(k, v)| SafetyLabelInfo {
+            label_type: *k,
+            description: v.source.as_deref().map(truncate_description),
+            source: botmaker_rule_id_from(v).map(|id| botmaker_rule_category(id).to_string()),
+        })
 }
 
 #[async_trait]
@@ -499,6 +502,82 @@ mod tests {
             hydrated.brand_safety_verdict,
             Some(BrandSafetyVerdict::MediumRisk)
         );
+    }
+
+    #[tokio::test]
+    async fn expired_community_note_does_not_keep_medium_risk() {
+        let mut labels: SafetyLabelMap = HashMap::new();
+        labels.insert(SafetyLabelType::GROK_SFA, SafetyLabel::default());
+        labels.insert(
+            SafetyLabelType::NSFA_COMMUNITY_NOTE,
+            SafetyLabel {
+                expires_at_msec: Some(1),
+                ..Default::default()
+            },
+        );
+        let client = Arc::new(FakeVfClient {
+            batch: SafetyLabelsBatch {
+                labels: HashMap::from([(1, labels)]),
+                failures: HashMap::new(),
+            },
+        });
+        let hydrator = AdsBrandSafetyVfHydrator { client };
+        let candidates = vec![PostCandidate {
+            tweet_id: 1,
+            ..Default::default()
+        }];
+
+        let results = hydrator
+            .hydrate(&ScoredPostsQuery::default(), &candidates)
+            .await;
+
+        let hydrated = results[0].as_ref().unwrap();
+        assert_eq!(
+            hydrated.brand_safety_verdict,
+            Some(BrandSafetyVerdict::Safe)
+        );
+        assert!(!hydrated
+            .safety_labels
+            .iter()
+            .any(|l| l.label_type == SafetyLabelType::NSFA_COMMUNITY_NOTE));
+    }
+
+    #[tokio::test]
+    async fn active_community_note_is_medium_risk_and_listed() {
+        let mut labels: SafetyLabelMap = HashMap::new();
+        labels.insert(SafetyLabelType::GROK_SFA, SafetyLabel::default());
+        labels.insert(
+            SafetyLabelType::NSFA_COMMUNITY_NOTE,
+            SafetyLabel {
+                expires_at_msec: Some(i64::MAX),
+                ..Default::default()
+            },
+        );
+        let client = Arc::new(FakeVfClient {
+            batch: SafetyLabelsBatch {
+                labels: HashMap::from([(1, labels)]),
+                failures: HashMap::new(),
+            },
+        });
+        let hydrator = AdsBrandSafetyVfHydrator { client };
+        let candidates = vec![PostCandidate {
+            tweet_id: 1,
+            ..Default::default()
+        }];
+
+        let results = hydrator
+            .hydrate(&ScoredPostsQuery::default(), &candidates)
+            .await;
+
+        let hydrated = results[0].as_ref().unwrap();
+        assert_eq!(
+            hydrated.brand_safety_verdict,
+            Some(BrandSafetyVerdict::MediumRisk)
+        );
+        assert!(hydrated
+            .safety_labels
+            .iter()
+            .any(|l| l.label_type == SafetyLabelType::NSFA_COMMUNITY_NOTE));
     }
 
     #[tokio::test]

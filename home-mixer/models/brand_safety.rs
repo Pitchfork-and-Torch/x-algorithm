@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 use xai_x_thrift::tweet_safety_label::{SafetyLabel, SafetyLabelSource, SafetyLabelType};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -37,25 +38,72 @@ pub(crate) const LOW_RISK_LABELS: &[SafetyLabelType] = &[
 
 const PTOS_CUTOFF_TWEET_ID: u64 = 2_054_275_414_225_846_272;
 
+fn now_msec() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+// GetSafetyLabels returns expired rows. Drop rules already skip them.
+// Ads adjacency still used type presence, so a lapsed Community Note
+// (or any other TTL label) kept the post MediumRisk.
+fn is_unexpired(label: &SafetyLabel, now_msec: i64) -> bool {
+    match label.expires_at_msec {
+        Some(exp) if exp <= now_msec => false,
+        _ => true,
+    }
+}
+
+fn has_active(
+    labels: &HashMap<SafetyLabelType, SafetyLabel>,
+    label_type: SafetyLabelType,
+    now_msec: i64,
+) -> bool {
+    labels
+        .get(&label_type)
+        .is_some_and(|label| is_unexpired(label, now_msec))
+}
+
+pub(crate) fn is_active_label(label: &SafetyLabel) -> bool {
+    is_unexpired(label, now_msec())
+}
+
 pub fn compute_verdict(
     labels: &HashMap<SafetyLabelType, SafetyLabel>,
     tweet_id: u64,
 ) -> BrandSafetyVerdict {
-    if MEDIUM_RISK_LABELS.iter().any(|l| labels.contains_key(l)) {
+    compute_verdict_at(labels, tweet_id, now_msec())
+}
+
+fn compute_verdict_at(
+    labels: &HashMap<SafetyLabelType, SafetyLabel>,
+    tweet_id: u64,
+    now_msec: i64,
+) -> BrandSafetyVerdict {
+    if MEDIUM_RISK_LABELS
+        .iter()
+        .any(|l| has_active(labels, *l, now_msec))
+    {
         return BrandSafetyVerdict::MediumRisk;
     }
 
-    let scored_by_grok = labels.contains_key(&SafetyLabelType::GROK_SFA)
-        || labels.contains_key(&SafetyLabelType::GROK_NSFA_LIMITED);
+    let scored_by_grok = has_active(labels, SafetyLabelType::GROK_SFA, now_msec)
+        || has_active(labels, SafetyLabelType::GROK_NSFA_LIMITED, now_msec);
     if !scored_by_grok {
         return BrandSafetyVerdict::MediumRisk;
     }
 
-    if tweet_id >= PTOS_CUTOFF_TWEET_ID && !labels.contains_key(&SafetyLabelType::PTOS_REVIEWED) {
+    if tweet_id >= PTOS_CUTOFF_TWEET_ID
+        && !has_active(labels, SafetyLabelType::PTOS_REVIEWED, now_msec)
+    {
         return BrandSafetyVerdict::MediumRisk;
     }
 
-    if LOW_RISK_LABELS.iter().any(|l| labels.contains_key(l)) {
+    if LOW_RISK_LABELS
+        .iter()
+        .any(|l| has_active(labels, *l, now_msec))
+    {
         return BrandSafetyVerdict::LowRisk;
     }
 
@@ -228,6 +276,104 @@ mod tests {
         );
         assert_eq!(
             worst_verdict(&BrandSafetyVerdict::MediumRisk, &BrandSafetyVerdict::Safe),
+            BrandSafetyVerdict::MediumRisk
+        );
+    }
+
+    fn label_with_expiry(expires_at_msec: Option<i64>) -> SafetyLabel {
+        SafetyLabel {
+            expires_at_msec,
+            ..Default::default()
+        }
+    }
+
+    fn labels_with_expiry(
+        types: &[(SafetyLabelType, Option<i64>)],
+    ) -> HashMap<SafetyLabelType, SafetyLabel> {
+        types
+            .iter()
+            .map(|(t, exp)| (*t, label_with_expiry(*exp)))
+            .collect()
+    }
+
+    #[test]
+    fn expired_community_note_does_not_keep_medium_risk() {
+        let labels = labels_with_expiry(&[
+            (SafetyLabelType::GROK_SFA, None),
+            (SafetyLabelType::NSFA_COMMUNITY_NOTE, Some(999)),
+        ]);
+        assert_eq!(
+            compute_verdict_at(&labels, PRE_CUTOFF_ID, 1_000),
+            BrandSafetyVerdict::Safe
+        );
+    }
+
+    #[test]
+    fn future_community_note_is_still_medium_risk() {
+        let labels = labels_with_expiry(&[
+            (SafetyLabelType::GROK_SFA, None),
+            (SafetyLabelType::NSFA_COMMUNITY_NOTE, Some(2_000)),
+        ]);
+        assert_eq!(
+            compute_verdict_at(&labels, PRE_CUTOFF_ID, 1_000),
+            BrandSafetyVerdict::MediumRisk
+        );
+    }
+
+    #[test]
+    fn missing_expiry_on_community_note_is_treated_as_permanent() {
+        let labels = labels_with_expiry(&[
+            (SafetyLabelType::GROK_SFA, None),
+            (SafetyLabelType::NSFA_COMMUNITY_NOTE, None),
+        ]);
+        assert_eq!(
+            compute_verdict_at(&labels, PRE_CUTOFF_ID, 1_000),
+            BrandSafetyVerdict::MediumRisk
+        );
+    }
+
+    #[test]
+    fn expiry_exactly_now_is_not_treated_as_active() {
+        let labels = labels_with_expiry(&[
+            (SafetyLabelType::GROK_SFA, None),
+            (SafetyLabelType::NSFA_COMMUNITY_NOTE, Some(1_000)),
+        ]);
+        assert_eq!(
+            compute_verdict_at(&labels, PRE_CUTOFF_ID, 1_000),
+            BrandSafetyVerdict::Safe
+        );
+    }
+
+    #[test]
+    fn expired_sibling_does_not_hide_an_active_medium_risk_label() {
+        let labels = labels_with_expiry(&[
+            (SafetyLabelType::GROK_SFA, None),
+            (SafetyLabelType::NSFA_COMMUNITY_NOTE, Some(500)),
+            (SafetyLabelType::NSFW_HIGH_PRECISION, Some(2_000)),
+        ]);
+        assert_eq!(
+            compute_verdict_at(&labels, PRE_CUTOFF_ID, 1_000),
+            BrandSafetyVerdict::MediumRisk
+        );
+    }
+
+    #[test]
+    fn expired_low_risk_label_does_not_keep_low_risk() {
+        let labels = labels_with_expiry(&[
+            (SafetyLabelType::GROK_SFA, None),
+            (SafetyLabelType::NSFA_LIMITED_INVENTORY, Some(999)),
+        ]);
+        assert_eq!(
+            compute_verdict_at(&labels, PRE_CUTOFF_ID, 1_000),
+            BrandSafetyVerdict::Safe
+        );
+    }
+
+    #[test]
+    fn expired_grok_sfa_is_treated_as_unscored() {
+        let labels = labels_with_expiry(&[(SafetyLabelType::GROK_SFA, Some(999))]);
+        assert_eq!(
+            compute_verdict_at(&labels, PRE_CUTOFF_ID, 1_000),
             BrandSafetyVerdict::MediumRisk
         );
     }
