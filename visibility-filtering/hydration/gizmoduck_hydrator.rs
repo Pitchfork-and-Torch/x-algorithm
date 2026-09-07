@@ -1,5 +1,7 @@
 use crate::clients::gizmoduck_client::GizmoduckLookup;
-use crate::hydration::batch::{AuthorHydrationBatch, HydrationBatch, TweetHydrationBatch};
+use crate::hydration::batch::{
+    AuthorHydrationBatch, Hydrated, HydrationBatch, TweetHydrationBatch,
+};
 use crate::hydration::fallback_cache::FallbackCache;
 use crate::hydration::metrics::{record_batch_size, timed_results};
 use crate::hydration::{keyed_by_author, tweets_per_author};
@@ -75,6 +77,28 @@ impl GizmoduckAuthorHydrator {
         };
         author_features.project(candidates.iter().map(|c| (c.tweet_id, c.author_id)))
     }
+}
+
+/// Failed or omitted gizmoduck reads must not look unlabeled.
+/// `SpamHighRecallUserLabelRule` (and sibling user-label drops) only check
+/// type presence on `AuthorFeatures`. `get_or_default` turns Failed into an
+/// empty `UserLabelSet`, so a store error would let a spam / low-quality
+/// author rank. Confirmed `NotFound` stays unlabeled.
+pub(crate) fn author_lookup_failed<V>(hydrated: Option<&Hydrated<V>>) -> bool {
+    match hydrated {
+        Some(Hydrated::Found(_)) | Some(Hydrated::NotFound) => false,
+        Some(Hydrated::Failed(_)) | None => true,
+    }
+}
+
+pub(crate) fn retain_candidates_with_usable_author_features(
+    candidates: Vec<TweetCandidateInput>,
+    author_features: &TweetHydrationBatch<AuthorFeatures>,
+) -> Vec<TweetCandidateInput> {
+    candidates
+        .into_iter()
+        .filter(|c| !author_lookup_failed(author_features.hydrated(&c.tweet_id)))
+        .collect()
 }
 
 fn author_features(user_result: GizmoduckUserResult) -> AuthorFeatures {
@@ -257,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn error_and_missing_author_results_fail_open_but_stay_failed() {
+    fn error_and_missing_author_results_stay_failed_and_are_not_usable() {
         let (a10, a20) = (candidate(1, 10).author_id, candidate(2, 20).author_id);
         let user_results: AuthorHydrationBatch<GizmoduckUserResult> = HydrationBatch::from_results(
             [a10, a20],
@@ -273,9 +297,74 @@ mod tests {
                 by_tweet.hydrated(&tweet_id),
                 Some(Hydrated::Failed(_))
             ));
+            assert!(author_lookup_failed(by_tweet.hydrated(&tweet_id)));
+            // get_or_default still looks unlabeled — that is why Failed must
+            // be omitted before assemble, not assembled as empty labels.
             let feature = by_tweet.get_or_default(&tweet_id);
             assert!(!feature.is_suspended);
-            assert!(!feature.is_deactivated);
+            assert!(!feature.user_labels.has_label(LabelValue::SPAM_HIGH_RECALL));
+            assert!(!feature.user_labels.has_label(LabelValue::LOW_QUALITY));
         }
+
+        let kept = retain_candidates_with_usable_author_features(
+            vec![candidate(1, 10), candidate(2, 20)],
+            &by_tweet,
+        );
+        assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn confirmed_not_found_stays_unlabeled_and_usable() {
+        let by_tweet: TweetHydrationBatch<AuthorFeatures> = HydrationBatch::from_results(
+            [TweetId(1)],
+            HashMap::from([(TweetId(1), Ok::<_, anyhow::Error>(None))]),
+        );
+
+        assert!(matches!(
+            by_tweet.hydrated(&TweetId(1)),
+            Some(Hydrated::NotFound)
+        ));
+        assert!(!author_lookup_failed(by_tweet.hydrated(&TweetId(1))));
+        assert!(!by_tweet
+            .get_or_default(&TweetId(1))
+            .user_labels
+            .has_label(LabelValue::SPAM_HIGH_RECALL));
+
+        let kept = retain_candidates_with_usable_author_features(vec![candidate(1, 10)], &by_tweet);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].tweet_id, TweetId(1));
+    }
+
+    #[test]
+    fn found_spam_and_low_quality_labels_stay_usable() {
+        let labeled = AuthorFeatures {
+            user_labels: UserLabelSet::new(
+                [LabelValue::SPAM_HIGH_RECALL, LabelValue::LOW_QUALITY]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        let by_tweet: TweetHydrationBatch<AuthorFeatures> = HydrationBatch::from_results(
+            [TweetId(1)],
+            HashMap::from([(TweetId(1), Ok::<_, anyhow::Error>(Some(labeled)))]),
+        );
+
+        assert!(!author_lookup_failed(by_tweet.hydrated(&TweetId(1))));
+        let feature = by_tweet.get(&TweetId(1)).expect("found");
+        assert!(feature.user_labels.has_label(LabelValue::SPAM_HIGH_RECALL));
+        assert!(feature.user_labels.has_label(LabelValue::LOW_QUALITY));
+
+        let kept = retain_candidates_with_usable_author_features(vec![candidate(1, 10)], &by_tweet);
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn missing_batch_slot_is_failed_not_unlabeled() {
+        let empty: TweetHydrationBatch<AuthorFeatures> = HydrationBatch::empty();
+        assert!(author_lookup_failed(empty.hydrated(&TweetId(1))));
+        let kept =
+            retain_candidates_with_usable_author_features(vec![candidate(1, 10)], &empty);
+        assert!(kept.is_empty());
     }
 }

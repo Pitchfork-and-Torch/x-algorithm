@@ -20,7 +20,9 @@ use crate::safety_label_source::SafetyLabelSource;
 use batch::TweetHydrationBatch;
 use exclusive_content_hydrator::ExclusiveContentHydrator;
 use fallback_cache::FallbackCache;
-use gizmoduck_hydrator::GizmoduckAuthorHydrator;
+use gizmoduck_hydrator::{
+    retain_candidates_with_usable_author_features, GizmoduckAuthorHydrator,
+};
 use safety_label_hydrator::{SafetyLabelHydration, SafetyLabelHydrator};
 use socialgraph_hydrator::SocialgraphHydrator;
 use std::collections::HashMap;
@@ -202,6 +204,9 @@ impl HydrationPipeline {
                 (core_datas, candidates, author_features, relationships),
             ) = tokio::join!(independent_group, author_hop);
 
+            let candidates =
+                retain_candidates_with_usable_author_features(candidates, &author_features);
+
             let SafetyLabelHydration {
                 label_types,
                 label_response,
@@ -314,6 +319,33 @@ mod tests {
             tweet_id: TweetId(tweet_id),
             request_author_id,
         }
+    }
+
+    #[test]
+    fn assemble_omits_failed_gizmoduck_authors_after_retain() {
+        let resolved = resolve_candidate(&raw(1, Some(10)), &HashMap::new()).unwrap();
+        let author_features = TweetHydrationBatch::from_results(
+            [TweetId(1)],
+            HashMap::from([(
+                TweetId(1),
+                Err::<Option<AuthorFeatures>, _>("gizmoduck unavailable"),
+            )]),
+        );
+        let usable = retain_candidates_with_usable_author_features(
+            vec![resolved],
+            &author_features,
+        );
+        assert!(usable.is_empty());
+
+        let assembled = CandidateFeatures {
+            tweet_features: HashMap::new(),
+            author_features,
+            safety_labels: HashMap::new(),
+            relationships: TweetHydrationBatch::empty(),
+            exclusive_content: HashMap::new(),
+        }
+        .assemble(&usable);
+        assert!(assembled.is_empty());
     }
 
     #[test]
