@@ -197,12 +197,16 @@ fn should_drop_ancillary(candidate: &PostCandidate, verdicts: &VfVerdicts) -> bo
     false
 }
 
+/// Hard-drop only. Interstitial on a quote / RT / ancestor is intentional
+/// keep-and-warn (Home NSFW rules emit Interstitial; Recs has Drop twins).
+/// Do not treat Interstitial as Drop here. TES flag misses that skip those
+/// rules are handled in visibility-filtering hydration (fail closed).
 fn should_drop_reason(reason: &FilteredReason) -> bool {
     match reason {
         FilteredReason::SafetyResult(safety_result) => {
             matches!(safety_result.action, Action::Drop(_))
         }
-        _ => true, 
+        _ => true,
     }
 }
 
