@@ -676,9 +676,9 @@ mod tests {
         assert_allows(underage, &gating_viewer(ViewerAge::Known(18)), &hp);
         assert_allows(underage, &gating_viewer(ViewerAge::Known(18)), &text);
         assert_allows(underage, &gating_viewer(ViewerAge::Unknown), &hp);
-        assert_allows(no_age, &gating_viewer(ViewerAge::Unknown), &hp);
+        assert_drops(no_age, &gating_viewer(ViewerAge::Unknown), &hp, &reason);
         assert_allows(underage, &gating_viewer(ViewerAge::Unknown), &text);
-        assert_allows(no_age, &gating_viewer(ViewerAge::Unknown), &text);
+        assert_drops(no_age, &gating_viewer(ViewerAge::Unknown), &text, &reason);
 
         let opted_in = ViewerFeatures {
             allows_sensitive_media: true,
@@ -1015,6 +1015,25 @@ mod tests {
         };
         assert_allows(no_age, &us, &hp);
         assert_allows(no_age, &us, &text);
+
+        let us_unknown = ViewerFeatures {
+            country_code: Some("us".into()),
+            ..gating_viewer(ViewerAge::Unknown)
+        };
+        assert_allows(no_age, &us_unknown, &hp);
+        assert_allows(no_age, &us_unknown, &text);
+        assert_drops(
+            no_age,
+            &gating_viewer(ViewerAge::Unknown),
+            &hp,
+            &reason,
+        );
+
+        let logged_out_unknown = ViewerFeatures {
+            viewer: Viewer::LoggedOut,
+            ..gating_viewer(ViewerAge::Unknown)
+        };
+        assert_allows(no_age, &logged_out_unknown, &hp);
 
         let missing = ViewerFeatures {
             country_code: None,
