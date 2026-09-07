@@ -5218,14 +5218,33 @@ impl Brazil2026ElectionFilter {
         // (ancestors are returned on the scored post for For You thread UI).
         candidate.ancestor_users.iter().copied().any(is_excluded)
     }
+
+    /// Art. 28 § 1º-A applies to recommendation for users in Brazil.
+    /// Unknown / empty request country stays in scope so a missing geo
+    /// header cannot disable the list. A known non-BR country does not.
+    fn applies_to_viewer(query: &ScoredPostsQuery) -> bool {
+        let country = query.country_code.trim();
+        country.is_empty() || country.eq_ignore_ascii_case("br")
+    }
 }
 
 impl Filter<ScoredPostsQuery, PostCandidate> for Brazil2026ElectionFilter {
+    fn enable(&self, query: &ScoredPostsQuery) -> bool {
+        Self::applies_to_viewer(query)
+    }
+
     fn filter(
         &self,
         query: &ScoredPostsQuery,
         candidates: Vec<PostCandidate>,
     ) -> FilterResult<PostCandidate> {
+        if !Self::applies_to_viewer(query) {
+            return FilterResult {
+                kept: candidates,
+                removed: Vec::new(),
+            };
+        }
+
         let followed_user_ids: FxHashSet<u64> = query
             .user_features
             .followed_user_ids
@@ -5252,6 +5271,13 @@ mod tests {
         PostCandidate {
             tweet_id,
             author_id,
+            ..Default::default()
+        }
+    }
+
+    fn query_with_country(country_code: &str) -> ScoredPostsQuery {
+        ScoredPostsQuery {
+            country_code: country_code.to_string(),
             ..Default::default()
         }
     }
@@ -5412,5 +5438,58 @@ mod tests {
                 &no_follows
             ));
         }
+    }
+
+    #[test]
+    fn known_non_brazil_viewer_keeps_listed_authors() {
+        let filter = Brazil2026ElectionFilter;
+        let listed = SAMPLE_LISTED[0];
+        let query = query_with_country("US");
+        assert!(!Brazil2026ElectionFilter::applies_to_viewer(&query));
+
+        let result = filter.filter(&query, vec![make_candidate(1, listed)]);
+
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.kept[0].author_id, listed);
+        assert!(result.removed.is_empty());
+    }
+
+    #[test]
+    fn brazil_viewer_still_drops_listed_authors() {
+        let filter = Brazil2026ElectionFilter;
+        let listed = SAMPLE_LISTED[0];
+        let query = query_with_country("BR");
+        assert!(Brazil2026ElectionFilter::applies_to_viewer(&query));
+
+        let result = filter.filter(&query, vec![make_candidate(1, 1), make_candidate(2, listed)]);
+
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.kept[0].tweet_id, 1);
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].author_id, listed);
+    }
+
+    #[test]
+    fn lowercase_br_is_in_scope() {
+        assert!(Brazil2026ElectionFilter::applies_to_viewer(
+            &query_with_country("br")
+        ));
+    }
+
+    #[test]
+    fn unknown_country_fails_closed() {
+        let filter = Brazil2026ElectionFilter;
+        let listed = SAMPLE_LISTED[1];
+        let query = query_with_country("");
+        assert!(Brazil2026ElectionFilter::applies_to_viewer(&query));
+        assert!(Brazil2026ElectionFilter::applies_to_viewer(
+            &ScoredPostsQuery::default()
+        ));
+
+        let result = filter.filter(&query, vec![make_candidate(1, listed)]);
+
+        assert!(result.kept.is_empty());
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].author_id, listed);
     }
 }
