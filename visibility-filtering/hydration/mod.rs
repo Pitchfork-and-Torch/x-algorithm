@@ -20,7 +20,7 @@ use crate::safety_label_source::SafetyLabelSource;
 use batch::TweetHydrationBatch;
 use exclusive_content_hydrator::ExclusiveContentHydrator;
 use fallback_cache::FallbackCache;
-use gizmoduck_hydrator::GizmoduckAuthorHydrator;
+use gizmoduck_hydrator::{retain_candidates_with_usable_author_features, GizmoduckAuthorHydrator};
 use safety_label_hydrator::{SafetyLabelHydration, SafetyLabelHydrator};
 use socialgraph_hydrator::SocialgraphHydrator;
 use std::collections::HashMap;
@@ -206,6 +206,9 @@ impl HydrationPipeline {
                 label_types,
                 label_response,
             } = safety_labels;
+
+            let candidates =
+                retain_candidates_with_usable_author_features(candidates, &author_features);
 
             let tweet_features = self.tes_hydrator.assemble_tweet_features(
                 &candidates,

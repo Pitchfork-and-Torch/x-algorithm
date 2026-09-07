@@ -1,9 +1,11 @@
 use crate::clients::gizmoduck_client::GizmoduckLookup;
-use crate::hydration::batch::{AuthorHydrationBatch, HydrationBatch, TweetHydrationBatch};
+use crate::hydration::batch::{
+    AuthorHydrationBatch, Hydrated, HydrationBatch, TweetHydrationBatch,
+};
 use crate::hydration::fallback_cache::FallbackCache;
 use crate::hydration::metrics::{record_batch_size, timed_results};
 use crate::hydration::{keyed_by_author, tweets_per_author};
-use crate::models::{AuthorFeatures, AuthorId, TweetCandidateInput, UserLabelSet};
+use crate::models::{AuthorFeatures, AuthorId, TweetCandidateInput, TweetId, UserLabelSet};
 use crate::rules::SafetyLevel;
 use std::time::Duration;
 use xai_core_entities::entities::GizmoduckUserResult;
@@ -75,6 +77,28 @@ impl GizmoduckAuthorHydrator {
         };
         author_features.project(candidates.iter().map(|c| (c.tweet_id, c.author_id)))
     }
+}
+
+/// Failed gizmoduck reads must not look unlabeled.
+/// `NsfwAuthorInterstitialRule` and NSFW user-label drops only check presence.
+pub(crate) fn author_safety_lookup_failed(
+    author_features: &TweetHydrationBatch<AuthorFeatures>,
+    id: TweetId,
+) -> bool {
+    match author_features.hydrated(&id) {
+        Some(Hydrated::Failed(_)) | None => true,
+        Some(Hydrated::Found(_)) | Some(Hydrated::NotFound) => false,
+    }
+}
+
+pub(crate) fn retain_candidates_with_usable_author_features(
+    candidates: Vec<TweetCandidateInput>,
+    author_features: &TweetHydrationBatch<AuthorFeatures>,
+) -> Vec<TweetCandidateInput> {
+    candidates
+        .into_iter()
+        .filter(|c| !author_safety_lookup_failed(author_features, c.tweet_id))
+        .collect()
 }
 
 fn author_features(user_result: GizmoduckUserResult) -> AuthorFeatures {
@@ -257,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn error_and_missing_author_results_fail_open_but_stay_failed() {
+    fn error_and_missing_author_results_stay_failed() {
         let (a10, a20) = (candidate(1, 10).author_id, candidate(2, 20).author_id);
         let user_results: AuthorHydrationBatch<GizmoduckUserResult> = HydrationBatch::from_results(
             [a10, a20],
@@ -274,8 +298,74 @@ mod tests {
                 Some(Hydrated::Failed(_))
             ));
             let feature = by_tweet.get_or_default(&tweet_id);
-            assert!(!feature.is_suspended);
-            assert!(!feature.is_deactivated);
+            assert!(!feature.is_nsfw_user);
+            assert!(!feature.is_nsfw_admin);
         }
+        assert!(author_safety_lookup_failed(&by_tweet, TweetId(1)));
+        assert!(author_safety_lookup_failed(&by_tweet, TweetId(2)));
+        assert!(retain_candidates_with_usable_author_features(
+            vec![candidate(1, 10), candidate(2, 20)],
+            &by_tweet,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn confirmed_not_found_author_is_not_a_lookup_failure() {
+        let a10 = candidate(1, 10).author_id;
+        let user_results: AuthorHydrationBatch<GizmoduckUserResult> = HydrationBatch::from_results(
+            [a10],
+            HashMap::from([(a10, Ok::<_, anyhow::Error>(None))]),
+        );
+        let by_tweet = user_results
+            .map(author_features)
+            .project([(TweetId(1), a10)]);
+
+        assert!(!author_safety_lookup_failed(&by_tweet, TweetId(1)));
+        assert_eq!(
+            retain_candidates_with_usable_author_features(vec![candidate(1, 10)], &by_tweet)
+                .iter()
+                .map(|c| c.tweet_id.0)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn retain_drops_only_ids_whose_author_lookup_failed() {
+        let (a10, a20) = (candidate(1, 10).author_id, candidate(2, 20).author_id);
+        let user_results: AuthorHydrationBatch<GizmoduckUserResult> = HydrationBatch::from_results(
+            [a10, a20],
+            HashMap::from([
+                (a10, Err(anyhow::anyhow!("gizmoduck unavailable"))),
+                (
+                    a20,
+                    Ok(Some(GizmoduckUserResult {
+                        user: Some(GizmoduckUser {
+                            user_id: 20,
+                            safety: Safety {
+                                nsfw_user: true,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })),
+                ),
+            ]),
+        );
+        let by_tweet = user_results
+            .map(author_features)
+            .project([(TweetId(1), a10), (TweetId(2), a20)]);
+
+        let kept = retain_candidates_with_usable_author_features(
+            vec![candidate(1, 10), candidate(2, 20)],
+            &by_tweet,
+        );
+        assert_eq!(
+            kept.iter().map(|c| c.tweet_id.0).collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(by_tweet.get_or_default(&TweetId(2)).is_nsfw_user);
     }
 }
