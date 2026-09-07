@@ -119,6 +119,9 @@ pub struct ScoredPostsQuery {
     pub impressed_post_ids: Vec<u64>,
     pub push_to_home_post_id: Option<u64>,
     pub seed_candidate_post_ids: Vec<u64>,
+    /// Set only after SubscribedUserIdsQueryHydrator succeeds.
+    /// An empty subscribed list with this false is a hydrator miss, not "no subscriptions".
+    pub subscribed_user_ids_hydrated: bool,
     #[serde(serialize_with = "serialize_debug")]
     pub following_pagination_meta: Arc<OnceLock<FollowingPaginationMeta>>,
 }
@@ -227,6 +230,7 @@ impl ScoredPostsQuery {
             impressed_post_ids: Vec::new(),
             push_to_home_post_id,
             seed_candidate_post_ids: Vec::new(),
+            subscribed_user_ids_hydrated: false,
             following_pagination_meta: Arc::new(OnceLock::new()),
         }
     }
