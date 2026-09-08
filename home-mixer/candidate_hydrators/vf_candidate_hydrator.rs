@@ -72,7 +72,7 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for VFCandidateHydrator {
             } else {
                 oon_ids.push(candidate.tweet_id);
             }
-            for &ancestor_id in &candidate.ancestors {
+            for ancestor_id in reply_ancestor_ids(candidate) {
                 oon_ids.push(ancestor_id);
             }
             if let Some(quoted_id) = candidate.quoted_tweet_id {
@@ -142,11 +142,25 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for VFCandidateHydrator {
     }
 }
 
+/// Thunder and Latest Following already copy `in_reply_to_tweet_id` into
+/// `ancestors`. Phoenix retrieval, MOE, Topics, and TweetMixer only set the
+/// reply id, so VF never fetched or dropped the parent.
+pub(crate) fn reply_ancestor_ids(candidate: &PostCandidate) -> Vec<u64> {
+    if !candidate.ancestors.is_empty() {
+        return candidate.ancestors.clone();
+    }
+    candidate
+        .in_reply_to_tweet_id
+        .filter(|&id| id != 0 && id != candidate.tweet_id)
+        .into_iter()
+        .collect()
+}
+
 pub(crate) fn should_drop_ancillary(
     candidate: &PostCandidate,
     vf_results: &HashMap<u64, Result<Option<FilteredReason>>>,
 ) -> bool {
-    for &ancestor_id in &candidate.ancestors {
+    for ancestor_id in reply_ancestor_ids(candidate) {
         if candidate.tombstone_ancestor_ids.contains(&ancestor_id) {
             continue;
         }
@@ -179,6 +193,112 @@ fn should_drop_reason(reason: &FilteredReason) -> bool {
         FilteredReason::SafetyResult(safety_result) => {
             matches!(safety_result.action, Action::Drop(_))
         }
-        _ => true, 
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn muted_author() -> FilteredReason {
+        FilteredReason::ViewerMutesAuthor
+    }
+
+    fn blocked_author() -> FilteredReason {
+        FilteredReason::AuthorBlockViewer
+    }
+
+    #[test]
+    fn reply_ancestor_ids_uses_in_reply_to_when_ancestors_empty() {
+        let candidate = PostCandidate {
+            tweet_id: 20,
+            in_reply_to_tweet_id: Some(10),
+            ancestors: vec![],
+            ..Default::default()
+        };
+        assert_eq!(reply_ancestor_ids(&candidate), vec![10]);
+    }
+
+    #[test]
+    fn reply_ancestor_ids_keeps_thunder_ancestors() {
+        let candidate = PostCandidate {
+            tweet_id: 30,
+            in_reply_to_tweet_id: Some(20),
+            ancestors: vec![20, 10],
+            ..Default::default()
+        };
+        assert_eq!(reply_ancestor_ids(&candidate), vec![20, 10]);
+    }
+
+    #[test]
+    fn reply_ancestor_ids_skips_self_and_zero() {
+        let self_reply = PostCandidate {
+            tweet_id: 10,
+            in_reply_to_tweet_id: Some(10),
+            ..Default::default()
+        };
+        assert!(reply_ancestor_ids(&self_reply).is_empty());
+
+        let zero = PostCandidate {
+            tweet_id: 10,
+            in_reply_to_tweet_id: Some(0),
+            ..Default::default()
+        };
+        assert!(reply_ancestor_ids(&zero).is_empty());
+    }
+
+    #[test]
+    fn phoenix_reply_drops_when_parent_author_is_muted() {
+        let candidate = PostCandidate {
+            tweet_id: 20,
+            in_reply_to_tweet_id: Some(10),
+            ancestors: vec![],
+            ..Default::default()
+        };
+        let mut vf = HashMap::new();
+        vf.insert(10, Ok(Some(muted_author())));
+        assert!(should_drop_ancillary(&candidate, &vf));
+    }
+
+    #[test]
+    fn phoenix_reply_drops_when_parent_author_blocked_viewer() {
+        let candidate = PostCandidate {
+            tweet_id: 20,
+            in_reply_to_tweet_id: Some(10),
+            ancestors: vec![],
+            ..Default::default()
+        };
+        let mut vf = HashMap::new();
+        vf.insert(10, Ok(Some(blocked_author())));
+        assert!(should_drop_ancillary(&candidate, &vf));
+    }
+
+    #[test]
+    fn phoenix_reply_keeps_when_parent_is_allowed() {
+        let candidate = PostCandidate {
+            tweet_id: 20,
+            in_reply_to_tweet_id: Some(10),
+            ancestors: vec![],
+            ..Default::default()
+        };
+        let vf: HashMap<u64, Result<Option<FilteredReason>>> = HashMap::new();
+        assert!(!should_drop_ancillary(&candidate, &vf));
+    }
+
+    #[test]
+    fn thunder_ancestors_still_drop_and_do_not_use_a_stale_in_reply_to() {
+        let candidate = PostCandidate {
+            tweet_id: 30,
+            in_reply_to_tweet_id: Some(99),
+            ancestors: vec![20, 10],
+            ..Default::default()
+        };
+        let mut vf = HashMap::new();
+        vf.insert(99, Ok(Some(muted_author())));
+        assert!(!should_drop_ancillary(&candidate, &vf));
+
+        vf.insert(20, Ok(Some(muted_author())));
+        assert!(should_drop_ancillary(&candidate, &vf));
     }
 }
