@@ -157,11 +157,38 @@ def topic_ids_to_bitmap(topic_entity_ids: list[int] | None) -> int:
         return 0
     bitmap = 0
     for topic_id in topic_entity_ids:
+        if topic_id == 0:
+            continue
         for bit in TOPIC_ID_TO_BITS.get(topic_id, ()):
             bitmap |= 1 << bit
         for bit in _POST_SIDE_GROUP_MEMBERS.get(topic_id, ()):
             bitmap |= 1 << bit
     return bitmap
+
+
+def request_topic_ids_to_bitmap(topic_entity_ids: list[int] | None) -> int:
+    """User-side topic mask. Same ID→bit map as posts.
+
+    Sports / Science / Technology parent IDs (and a few siblings) live only in
+    `_POST_SIDE_GROUP_MEMBERS`. A `TOPIC_ID_TO_BITS`-only lookup yields 0, and
+    serving treats a zero user mask as "no topic filter" — unfiltered organic
+    candidates leak into topic retrieval.
+    """
+    return topic_ids_to_bitmap(topic_entity_ids)
+
+
+def build_request_topic_bitmasks(
+    topic_entity_id_lists: list[list[int]] | None, batch_size: int
+) -> list[int]:
+    """Per-row user masks for a retrieval batch, padded or truncated to batch_size."""
+    masks = [0] * batch_size
+    if not topic_entity_id_lists:
+        return masks
+    for i, tids in enumerate(topic_entity_id_lists):
+        if i >= batch_size:
+            break
+        masks[i] = request_topic_ids_to_bitmap(tids)
+    return masks
 
 
 def bitmaps_to_int32_array(bitmaps: list[int]) -> npt.NDArray[np.int32]:

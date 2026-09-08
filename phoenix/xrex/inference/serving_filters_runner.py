@@ -31,8 +31,8 @@ from xrex.models.recsys_two_tower_serving_filters import forward_with_filters
 from xrex.models.sharding_context import make_legacy_sharding_context
 from xrex.models.topic_categories import (
     NUM_TOPIC_INT32S,
-    TOPIC_ID_TO_BITS,
     bitmaps_to_int32_array,
+    build_request_topic_bitmasks,
     topic_ids_to_bitmap,
 )
 from xrex.train.trainer import RecsysTwoTowerModelConfig, TrainerContext
@@ -128,7 +128,7 @@ class FilteredRetrievalModelRunner(RetrievalModelRunner):
         if not new_bitmaps:
             logger.warning(
                 "No topic bitmaps loaded from any parquet file; "
-                "topic filtering will silently pass through all candidates."
+                "topic requests will match nothing instead of passing through."
             )
         self._all_topic_bitmaps = new_bitmaps
 
@@ -351,18 +351,10 @@ class FilteredRetrievalModelRunner(RetrievalModelRunner):
                 topic_bitmaps = jnp.zeros((N, NUM_TOPIC_INT32S), dtype=jnp.int32)
 
             batch_size = batch["user_hashes"].shape[0]
-            if request is not None and self._all_topic_bitmaps:
-                topic_entity_id_list = request.get_topic_entity_ids()
-                raw_bitmasks = [0] * batch_size
-                for i, tids in enumerate(topic_entity_id_list):
-                    if i >= batch_size:
-                        break
-                    mask = 0
-                    for tid in tids:
-                        if tid != 0 and tid in TOPIC_ID_TO_BITS:
-                            for bit in TOPIC_ID_TO_BITS[tid]:
-                                mask |= 1 << bit
-                    raw_bitmasks[i] = mask
+            if request is not None:
+                raw_bitmasks = build_request_topic_bitmasks(
+                    request.get_topic_entity_ids(), batch_size
+                )
                 topic_user_bitmasks = jnp.array(
                     bitmaps_to_int32_array(raw_bitmasks), dtype=jnp.int32
                 )
