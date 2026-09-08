@@ -366,6 +366,65 @@ impl RankingScorer {
         score.unwrap_or(0.0) * weight
     }
 
+    // Live sink: PhoenixCandidatePipeline scorers
+    // [PhoenixScorer, RankingScorer, VMRanker] -> TopKScoreSelector.
+    // TopK treats score == None as -inf (drop). A Phoenix lookup miss,
+    // missing scoring_sequence, or >PHOENIX_CLIENT_MAX_CANDIDATES overflow
+    // leaves every head None. apply() used to treat that as 0 and
+    // offset_score wrote Some(NEGATIVE_SCORES_OFFSET), so those posts
+    // still ranked. Some(0.0) is a real prediction and still ranks.
+    pub(crate) fn phoenix_heads_present(scores: &PhoenixScores) -> bool {
+        scores.favorite_score.is_some()
+            || scores.reply_score.is_some()
+            || scores.retweet_score.is_some()
+            || scores.photo_expand_score.is_some()
+            || scores.video_open_score.is_some()
+            || scores.click_score.is_some()
+            || scores.open_link_score.is_some()
+            || scores.profile_click_score.is_some()
+            || scores.vqv_score.is_some()
+            || scores.share_score.is_some()
+            || scores.share_via_dm_score.is_some()
+            || scores.share_via_copy_link_score.is_some()
+            || scores.dwell_score.is_some()
+            || scores.quote_score.is_some()
+            || scores.quoted_click_score.is_some()
+            || scores.quoted_vqv_score.is_some()
+            || scores.dwell_time.is_some()
+            || scores.click_dwell_time.is_some()
+            || scores.active_secs_5m_residual_norm.is_some()
+            || scores.follow_author_score.is_some()
+            || scores.post_unexplored_score.is_some()
+            || scores.not_interested_score.is_some()
+            || scores.block_author_score.is_some()
+            || scores.mute_author_score.is_some()
+            || scores.report_score.is_some()
+            || scores.not_dwelled_score.is_some()
+    }
+
+    fn ranked_update(
+        has_heads: bool,
+        weighted: f64,
+        score: f64,
+        slate_context: Option<SlateContext>,
+    ) -> PostCandidate {
+        if has_heads {
+            PostCandidate {
+                weighted_score: Some(weighted),
+                score: Some(score),
+                slate_context,
+                ..Default::default()
+            }
+        } else {
+            PostCandidate {
+                weighted_score: None,
+                score: None,
+                slate_context,
+                ..Default::default()
+            }
+        }
+    }
+
     pub(crate) fn compute_weighted_score(
         weights: &ScoringWeights,
         query: &ScoredPostsQuery,
@@ -720,12 +779,12 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
                 .zip(final_scores)
                 .enumerate()
                 .map(|(i, (&weighted, score))| {
-                    Ok(PostCandidate {
-                        weighted_score: Some(weighted),
-                        score: Some(score),
-                        slate_context: persisted_contexts.as_ref().map(|contexts| contexts[i]),
-                        ..Default::default()
-                    })
+                    Ok(Self::ranked_update(
+                        Self::phoenix_heads_present(&candidates[i].phoenix_scores),
+                        weighted,
+                        score,
+                        persisted_contexts.as_ref().map(|contexts| contexts[i]),
+                    ))
                 })
                 .collect();
         }
@@ -758,12 +817,12 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
             .zip(final_scores)
             .enumerate()
             .map(|(i, (&weighted, score))| {
-                Ok(PostCandidate {
-                    weighted_score: Some(weighted),
-                    score: Some(score),
-                    slate_context: persisted_contexts.as_ref().map(|contexts| contexts[i]),
-                    ..Default::default()
-                })
+                Ok(Self::ranked_update(
+                    Self::phoenix_heads_present(&candidates[i].phoenix_scores),
+                    weighted,
+                    score,
+                    persisted_contexts.as_ref().map(|contexts| contexts[i]),
+                ))
             })
             .collect()
     }
@@ -804,10 +863,18 @@ mod tests {
         query
     }
 
+    fn scored_heads() -> PhoenixScores {
+        PhoenixScores {
+            favorite_score: Some(0.0),
+            ..Default::default()
+        }
+    }
+
     fn candidate(author_id: u64, in_network: Option<bool>) -> PostCandidate {
         PostCandidate {
             author_id,
             in_network,
+            phoenix_scores: scored_heads(),
             ..Default::default()
         }
     }
@@ -817,6 +884,7 @@ mod tests {
             author_id,
             in_network,
             in_reply_to_tweet_id: Some(42),
+            phoenix_scores: scored_heads(),
             ..Default::default()
         }
     }
@@ -826,8 +894,69 @@ mod tests {
             author_id,
             in_network,
             retweeted_tweet_id: Some(42),
+            phoenix_scores: scored_heads(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn phoenix_heads_present_treats_some_zero_as_scored() {
+        assert!(!RankingScorer::phoenix_heads_present(
+            &PhoenixScores::default()
+        ));
+        assert!(RankingScorer::phoenix_heads_present(&PhoenixScores {
+            favorite_score: Some(0.0),
+            ..Default::default()
+        }));
+        assert!(RankingScorer::phoenix_heads_present(&PhoenixScores {
+            report_score: Some(0.0),
+            ..Default::default()
+        }));
+    }
+
+    #[tokio::test]
+    async fn missing_phoenix_heads_leave_score_unset_for_topk_drop() {
+        let scorer = test_scorer();
+        let missing = PostCandidate {
+            author_id: 1,
+            in_network: Some(true),
+            ..Default::default()
+        };
+        let query = query_with_flags(&[("rust_home_mixer_value_model_mode", "weighted")]);
+        let scored = scorer.score(&query, std::slice::from_ref(&missing)).await;
+        let out = scored[0].as_ref().unwrap();
+        assert!(out.score.is_none(), "missing heads must not invent a rank");
+        assert!(out.weighted_score.is_none());
+        assert!(!RankingScorer::phoenix_heads_present(&missing.phoenix_scores));
+    }
+
+    #[tokio::test]
+    async fn zero_favorite_head_still_ranks() {
+        let scorer = test_scorer();
+        let query = query_with_flags(&[("rust_home_mixer_value_model_mode", "weighted")]);
+        let scored = scorer
+            .score(&query, std::slice::from_ref(&candidate(1, Some(true))))
+            .await;
+        let out = scored[0].as_ref().unwrap();
+        assert!(out.score.is_some(), "Some(0.0) is a real Phoenix head");
+        assert!(out.weighted_score.is_some());
+    }
+
+    #[tokio::test]
+    async fn mixed_slate_drops_only_the_unscored_candidate() {
+        let scorer = test_scorer();
+        let candidates = vec![
+            candidate(1, Some(true)),
+            PostCandidate {
+                author_id: 2,
+                in_network: Some(true),
+                ..Default::default()
+            },
+        ];
+        let query = query_with_flags(&[("rust_home_mixer_value_model_mode", "weighted")]);
+        let scored = scorer.score(&query, &candidates).await;
+        assert!(scored[0].as_ref().unwrap().score.is_some());
+        assert!(scored[1].as_ref().unwrap().score.is_none());
     }
 
     #[tokio::test]
