@@ -110,12 +110,75 @@ fn ad_bsr_levels(items: &[FeedItem]) -> Vec<BrandSafetyRiskLevel> {
         .collect()
 }
 
+fn organic_ids(items: &[FeedItem]) -> Vec<u64> {
+    items
+        .iter()
+        .filter_map(|item| match &item.item {
+            Some(feed_item::Item::Post(p)) => Some(p.tweet_id),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn unspecified_is_not_an_ads_avoid_post() {
+    let post = make_post(1);
+    assert_eq!(
+        post.brand_safety_verdict(),
+        BrandSafetyVerdict::VerdictUnspecified
+    );
+    assert!(
+        !crate::ads::util::has_avoid(&post),
+        "Unspecified must not be treated as MediumRisk avoid"
+    );
+}
+
+fn make_safe_post(tweet_id: u64) -> ScoredPost {
+    ScoredPost {
+        tweet_id,
+        brand_safety_verdict: BrandSafetyVerdict::Safe.into(),
+        score: 1.0 - (tweet_id as f32 * 0.01),
+        ..Default::default()
+    }
+}
+
 #[test]
 fn test_no_ads() {
     let posts = vec![make_post(1), make_post(2), make_post(3)];
     let result = blend_impl(posts, vec![], 5);
     assert_eq!(result.len(), 3);
     assert_eq!(ad_count(&result), 0);
+}
+
+#[test]
+fn unspecified_top_organic_keeps_rank_when_ads_are_placed() {
+    let mut top = make_post(1);
+    top.score = 10.0;
+    top.brand_safety_verdict = BrandSafetyVerdict::VerdictUnspecified.into();
+    let mut posts = vec![top];
+    posts.extend((2..=6).map(make_safe_post));
+    let result = blend_impl(posts, vec![make_normal_ad(100)], 5);
+    assert!(ad_count(&result) > 0);
+    assert_eq!(
+        organic_ids(&result).first().copied(),
+        Some(1),
+        "an unspecified ads-VF verdict must not demote the top organic"
+    );
+}
+
+#[test]
+fn medium_risk_top_organic_is_kept_off_ad_neighbors() {
+    let mut top = make_avoid_post(1);
+    top.score = 10.0;
+    let mut posts = vec![top];
+    posts.extend((2..=6).map(make_safe_post));
+    let result = blend_impl(posts, vec![make_normal_ad(100)], 5);
+    assert!(ad_count(&result) > 0);
+    assert_ne!(
+        organic_ids(&result).first().copied(),
+        Some(1),
+        "a real MediumRisk ads verdict may still be kept off ad neighbors"
+    );
 }
 
 #[test]
