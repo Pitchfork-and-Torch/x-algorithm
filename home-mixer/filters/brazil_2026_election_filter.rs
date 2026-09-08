@@ -1383,12 +1383,16 @@ impl Filter<ScoredPostsQuery, PostCandidate> for Brazil2026ElectionFilter {
         query: &ScoredPostsQuery,
         candidates: Vec<PostCandidate>,
     ) -> FilterResult<PostCandidate> {
-        let followed_user_ids: FxHashSet<u64> = query
+        let mut followed_user_ids: FxHashSet<u64> = query
             .user_features
             .followed_user_ids
             .iter()
             .map(|&id| id as u64)
             .collect();
+        // followed_user_ids never includes the viewer. Treat self as allowed so a
+        // listed viewer's own id is not excluded when it appears as retweeted /
+        // quoted / ancestor (SelfReplyChainFilter uses the same insert).
+        followed_user_ids.insert(query.user_id);
 
         let (removed, kept): (Vec<_>, Vec<_>) = candidates
             .into_iter()
@@ -1401,6 +1405,7 @@ impl Filter<ScoredPostsQuery, PostCandidate> for Brazil2026ElectionFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::user_features::UserFeatures;
 
     /// Stable sample ids from the set (sorted source list order).
     const SAMPLE_LISTED: [u64; 4] = [14160928, 14492205, 15022409, 20242549];
@@ -1409,6 +1414,17 @@ mod tests {
         PostCandidate {
             tweet_id,
             author_id,
+            ..Default::default()
+        }
+    }
+
+    fn query_with_follows(viewer_id: u64, followed: Vec<i64>) -> ScoredPostsQuery {
+        ScoredPostsQuery {
+            user_id: viewer_id,
+            user_features: UserFeatures {
+                followed_user_ids: followed,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -1569,5 +1585,85 @@ mod tests {
                 &no_follows
             ));
         }
+    }
+
+    #[test]
+    fn keeps_listed_author_the_viewer_follows() {
+        let filter = Brazil2026ElectionFilter;
+        let listed = SAMPLE_LISTED[0];
+        let query = query_with_follows(99, vec![listed as i64]);
+        let candidates = vec![
+            make_candidate(1, 1),
+            make_candidate(2, listed),
+            make_candidate(3, SAMPLE_LISTED[1]),
+        ];
+
+        let result = filter.filter(&query, candidates);
+
+        assert_eq!(
+            result.kept.iter().map(|c| c.tweet_id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].author_id, SAMPLE_LISTED[1]);
+    }
+
+    #[test]
+    fn keeps_retweet_quote_and_ancestor_when_listed_id_is_viewer() {
+        let filter = Brazil2026ElectionFilter;
+        let listed = SAMPLE_LISTED[0];
+        let query = query_with_follows(listed, vec![]);
+
+        let mut retweet = make_candidate(10, 999);
+        retweet.retweeted_user_id = Some(listed);
+        let mut quote = make_candidate(20, 888);
+        quote.quoted_user_id = Some(listed);
+        let mut reply = make_candidate(30, 777);
+        reply.in_reply_to_tweet_id = Some(29);
+        reply.ancestors = vec![29];
+        reply.ancestor_users = vec![listed];
+
+        let result = filter.filter(&query, vec![retweet, quote, reply]);
+
+        assert_eq!(result.kept.len(), 3);
+        assert!(result.removed.is_empty());
+    }
+
+    #[test]
+    fn still_drops_unfollowed_listed_retweet_quote_and_ancestor() {
+        let filter = Brazil2026ElectionFilter;
+        let listed = SAMPLE_LISTED[1];
+        let query = query_with_follows(99, vec![]);
+
+        let mut retweet = make_candidate(10, 999);
+        retweet.retweeted_user_id = Some(listed);
+        let mut quote = make_candidate(20, 888);
+        quote.quoted_user_id = Some(listed);
+        let mut reply = make_candidate(30, 777);
+        reply.in_reply_to_tweet_id = Some(29);
+        reply.ancestors = vec![29];
+        reply.ancestor_users = vec![listed];
+
+        let result = filter.filter(&query, vec![retweet, quote, reply]);
+
+        assert!(result.kept.is_empty());
+        assert_eq!(result.removed.len(), 3);
+    }
+
+    #[test]
+    fn keeps_reply_when_viewer_follows_listed_ancestor() {
+        let filter = Brazil2026ElectionFilter;
+        let listed = SAMPLE_LISTED[3];
+        let query = query_with_follows(99, vec![listed as i64]);
+        let mut reply = make_candidate(30, 777);
+        reply.in_reply_to_tweet_id = Some(29);
+        reply.ancestors = vec![29, 28];
+        reply.ancestor_users = vec![listed, 42];
+
+        let result = filter.filter(&query, vec![reply]);
+
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.kept[0].tweet_id, 30);
+        assert!(result.removed.is_empty());
     }
 }
