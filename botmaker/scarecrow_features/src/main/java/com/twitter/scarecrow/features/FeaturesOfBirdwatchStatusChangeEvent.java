@@ -17,28 +17,39 @@ public class FeaturesOfBirdwatchStatusChangeEvent extends FeatureMapExtractor {
 
   @Override
   public void apply(FeatureMapBuilder builder) throws Exception {
-    if (event.isSetTweetId()) {
-      if (event.isSetBeforeStatus() && event.isSetAfterStatus()) {
-        builder.putValue(FeatureModifier.REQUIRED, BotMakerFeatures.tweetId, event.getTweetId());
-        boolean isPreviouslyNMR = event.getBeforeStatus()
-            == BirdwatchNoteRatingStatus.NEEDS_MORE_RATINGS;
-        boolean isCurrentlyCRH = event.getAfterStatus()
-            == BirdwatchNoteRatingStatus.CURRENTLY_RATED_HELPFUL;
-        builder.putValue(FeatureModifier.REQUIRED, BotMakerFeatures.communityNoteVisible,
-            isPreviouslyNMR && isCurrentlyCRH);
-      } else if (event.isSetNoteStatusChanges() && event.getNoteStatusChangesSize() > 0) {
-        builder.putValue(FeatureModifier.REQUIRED, BotMakerFeatures.tweetId, event.getTweetId());
-        boolean featureValue = false;
-        for (BirdwatchStatusChangeEventNoteStatusChange change : event.getNoteStatusChanges()) {
-          if (change.isSetBeforeStatus() && change.isSetAfterStatus()
-              && change.getBeforeStatus() == BirdwatchNoteRatingStatus.NEEDS_MORE_RATINGS
-              && change.getAfterStatus() == BirdwatchNoteRatingStatus.CURRENTLY_RATED_HELPFUL) {
-            featureValue = true;
-          }
+    if (!event.isSetTweetId()) {
+      return;
+    }
+
+    boolean hasStatus = false;
+    boolean visible = false;
+
+    if (event.isSetAfterStatus()) {
+      hasStatus = true;
+      visible = isCurrentlyRatedHelpful(event.getAfterStatus());
+    }
+
+    if (event.isSetNoteStatusChanges()) {
+      for (BirdwatchStatusChangeEventNoteStatusChange change : event.getNoteStatusChanges()) {
+        if (!change.isSetAfterStatus()) {
+          continue;
         }
-        builder.putValue(FeatureModifier.REQUIRED, BotMakerFeatures.communityNoteVisible,
-            featureValue);
+        hasStatus = true;
+        if (isCurrentlyRatedHelpful(change.getAfterStatus())) {
+          visible = true;
+        }
       }
     }
+
+    if (!hasStatus) {
+      return;
+    }
+
+    builder.putValue(FeatureModifier.REQUIRED, BotMakerFeatures.tweetId, event.getTweetId());
+    builder.putValue(FeatureModifier.REQUIRED, BotMakerFeatures.communityNoteVisible, visible);
+  }
+
+  private static boolean isCurrentlyRatedHelpful(BirdwatchNoteRatingStatus status) {
+    return status == BirdwatchNoteRatingStatus.CURRENTLY_RATED_HELPFUL;
   }
 }
