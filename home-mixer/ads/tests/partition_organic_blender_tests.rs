@@ -131,6 +131,38 @@ fn test_too_few_posts() {
     assert_eq!(ad_count(&result), 0);
 }
 
+fn organic_ids(items: &[FeedItem]) -> Vec<u64> {
+    items
+        .iter()
+        .filter_map(|item| match &item.item {
+            Some(feed_item::Item::Post(p)) => Some(p.tweet_id),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn medium_risk_avoid_buries_higher_scored_organic() {
+    // Sink of Community Notes x rank: MediumRisk is ads-avoid. The blender
+    // pulls avoid posts out of Phoenix order and dumps them into filler.
+    // A note must not produce this verdict (brand_safety tests). This locks
+    // the bury so a later MediumRisk writer cannot hide.
+    let posts = vec![
+        make_post(1),
+        make_avoid_post(2),
+        make_post(3),
+        make_post(4),
+        make_post(5),
+    ];
+    let result = blend_impl(posts, vec![make_normal_ad(100)], 5);
+    let ids = organic_ids(&result);
+    assert_eq!(
+        ids,
+        vec![1, 3, 2, 4, 5],
+        "MediumRisk post 2 (score > 3) must lose rank to Safe post 3 when ads place: {ids:?}"
+    );
+}
+
 #[test]
 fn test_basic_blending_all_safe() {
     let posts: Vec<_> = (1..=10).map(make_post).collect();

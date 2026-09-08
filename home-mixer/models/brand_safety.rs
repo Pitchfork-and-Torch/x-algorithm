@@ -29,7 +29,7 @@ pub(crate) const MEDIUM_RISK_LABELS: &[SafetyLabelType] = &[
     SafetyLabelType::NSFW_CARD_IMAGE,
     SafetyLabelType::DO_NOT_AMPLIFY,
     SafetyLabelType::MALICIOUS_URL,
-    SafetyLabelType::NSFA_COMMUNITY_NOTE,
+    // Notes are crowd context. They are not ads MediumRisk (see tests).
     SafetyLabelType::GROK_NSFA,
     SafetyLabelType::NSFW_TEXT,
 ];
@@ -78,7 +78,6 @@ pub(crate) const MEDIUM_RISK_LABELS_V2: &[SafetyLabelType] = &[
     SafetyLabelType::NSFW_CARD_IMAGE,
     SafetyLabelType::DO_NOT_AMPLIFY,
     SafetyLabelType::MALICIOUS_URL,
-    SafetyLabelType::NSFA_COMMUNITY_NOTE,
     SafetyLabelType::GROK_NSFA_V2,
     SafetyLabelType::GROK_NSFA_EXPANDED_V2,
     SafetyLabelType::NSFW_TEXT,
@@ -279,6 +278,58 @@ mod tests {
     }
 
     #[test]
+    fn community_note_is_not_ads_medium_risk() {
+        assert!(
+            !MEDIUM_RISK_LABELS.contains(&SafetyLabelType::NSFA_COMMUNITY_NOTE),
+            "v1 MediumRisk must not include Community Notes"
+        );
+        assert!(
+            !MEDIUM_RISK_LABELS_V2.contains(&SafetyLabelType::NSFA_COMMUNITY_NOTE),
+            "v2 MediumRisk must not include Community Notes"
+        );
+
+        let noted = labels_with(&[
+            SafetyLabelType::GROK_SFA,
+            SafetyLabelType::NSFA_COMMUNITY_NOTE,
+        ]);
+        assert_eq!(
+            compute_verdict(&noted, PRE_CUTOFF_ID),
+            BrandSafetyVerdict::Safe,
+            "a Grok-safe noted post must keep Phoenix-adjacent Safe verdict"
+        );
+
+        let noted_v2 = labels_with(&[
+            SafetyLabelType::GROK_SFA_V2,
+            SafetyLabelType::NSFA_COMMUNITY_NOTE,
+        ]);
+        assert_eq!(
+            compute_verdict_v2(&noted_v2, PRE_CUTOFF_ID),
+            BrandSafetyVerdict::Safe,
+            "v2 Grok-safe noted post must keep Safe verdict"
+        );
+    }
+
+    #[test]
+    fn community_note_does_not_mask_real_medium_or_unscored() {
+        let noted_nsfa = labels_with(&[
+            SafetyLabelType::GROK_SFA,
+            SafetyLabelType::NSFA_COMMUNITY_NOTE,
+            SafetyLabelType::GROK_NSFA,
+        ]);
+        assert_eq!(
+            compute_verdict(&noted_nsfa, PRE_CUTOFF_ID),
+            BrandSafetyVerdict::MediumRisk
+        );
+
+        let note_only = labels_with(&[SafetyLabelType::NSFA_COMMUNITY_NOTE]);
+        assert_eq!(
+            compute_verdict(&note_only, PRE_CUTOFF_ID),
+            BrandSafetyVerdict::MediumRisk,
+            "unscored posts stay MediumRisk; the note is not a Grok score"
+        );
+    }
+
+    #[test]
     fn v2_defers_to_v1_when_v2_has_not_ruled() {
         let v1_safe = labels_with(&[SafetyLabelType::GROK_SFA]);
         assert_eq!(
@@ -365,6 +416,10 @@ mod tests {
                 SafetyLabelType::GROK_SFA,
                 SafetyLabelType::NSFA_HIGH_PRECISION,
                 SafetyLabelType::GROK_NSFA,
+            ],
+            &[
+                SafetyLabelType::GROK_SFA,
+                SafetyLabelType::NSFA_COMMUNITY_NOTE,
             ],
         ];
 
