@@ -33,3 +33,48 @@ impl Filter<ScoredPostsQuery, PostCandidate> for PreviouslySeenPostsFilter {
         FilterResult { kept, removed }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(tweet_id: u64, retweeted: Option<u64>, in_reply_to: Option<u64>) -> PostCandidate {
+        PostCandidate {
+            tweet_id,
+            retweeted_tweet_id: retweeted,
+            in_reply_to_tweet_id: in_reply_to,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn keeps_reply_when_only_the_parent_was_seen() {
+        let query = ScoredPostsQuery {
+            seen_ids: vec![10],
+            ..Default::default()
+        };
+        let result = PreviouslySeenPostsFilter.filter(
+            &query,
+            vec![
+                candidate(20, None, Some(10)),
+                candidate(10, None, None),
+                candidate(30, Some(10), None),
+            ],
+        );
+        let kept: Vec<u64> = result.kept.iter().map(|c| c.tweet_id).collect();
+        let removed: Vec<u64> = result.removed.iter().map(|c| c.tweet_id).collect();
+        assert_eq!(kept, vec![20]);
+        assert_eq!(removed, vec![10, 30]);
+    }
+
+    #[test]
+    fn drops_reply_when_the_reply_itself_was_seen() {
+        let query = ScoredPostsQuery {
+            seen_ids: vec![20],
+            ..Default::default()
+        };
+        let result = PreviouslySeenPostsFilter.filter(&query, vec![candidate(20, None, Some(10))]);
+        assert!(result.kept.is_empty());
+        assert_eq!(result.removed.len(), 1);
+    }
+}

@@ -32,3 +32,34 @@ impl Filter<ScoredPostsQuery, PostCandidate> for PreviouslyServedPostsFilter {
         FilterResult { kept, removed }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_reply_when_only_the_parent_was_served() {
+        let query = ScoredPostsQuery {
+            served_ids: vec![10],
+            ..Default::default()
+        };
+        let result = PreviouslyServedPostsFilter.filter(
+            &query,
+            vec![
+                PostCandidate {
+                    tweet_id: 20,
+                    in_reply_to_tweet_id: Some(10),
+                    ..Default::default()
+                },
+                PostCandidate {
+                    tweet_id: 10,
+                    ..Default::default()
+                },
+            ],
+        );
+        let kept: Vec<u64> = result.kept.iter().map(|c| c.tweet_id).collect();
+        let removed: Vec<u64> = result.removed.iter().map(|c| c.tweet_id).collect();
+        assert_eq!(kept, vec![20]);
+        assert_eq!(removed, vec![10]);
+    }
+}
