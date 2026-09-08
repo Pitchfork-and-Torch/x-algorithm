@@ -25,6 +25,21 @@ action: |
         OneDayInSecs * 75
       );
     }
+    # grok_share (24603) is the only other writer and requires this label
+    # already to exist. When the share mapping is populated here, that
+    # event has already fired without the label and will not fire again.
+    # Write the URL verdict from the share ids this bot already fetched,
+    # matching 7429 (card image) and 24603 (share event).
+    for (:shareId in :grok_share_ids) {
+      val :url = Concat("https://x.com/i/grok/share/", Trim(ToString(:shareId)));
+      val :urlVerdict = GetUrlVerdictV2(:url);
+      val :verdict = DictGetOrElse(:urlVerdict, "verdict", "UNKNOWN");
+      if (:verdict != "NSFW_CARD_IMAGE" && :verdict != "BAD") {
+        WriteUrlVerdictsV2(Set(:url), "NSFW_CARD_IMAGE", 86400 * 7, "EXACT_URL_MATCH","updating reputation store for NSFW detection","botmaker", "bot_24493");
+        IncrementStat("Grok_URLs_added_as_NSFW_CARD_IMAGE_in_Rep_Store", 1);
+        Log("nsfw_card_url_grok_media_update_log", :url);
+      }
+    }
   }
 expiry: '2029-10-18T21:18:09.279Z'
 isActive: 'true'
