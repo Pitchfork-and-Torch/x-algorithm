@@ -801,6 +801,27 @@ mod tests {
             .build();
         assert_drops(stale, &viewer(VIEWER_ID), &stale_c, &reason);
         assert_allows(stale, &viewer(VIEWER_ID), &candidate().build());
+        let failed_lookup = candidate()
+            .with_tweet_features(TweetFeatures {
+                edit_control_lookup_failed: true,
+                ..Default::default()
+            })
+            .build();
+        assert_drops(stale, &viewer(VIEWER_ID), &failed_lookup, &reason);
+        assert_drops(stale, &author_viewer(), &failed_lookup, &reason);
+        assert_drops(stale, &logged_out_viewer(), &failed_lookup, &reason);
+        let missing_initial = candidate()
+            .with_tweet_features(TweetFeatures {
+                edit_control: Some(EditControl::Edit(
+                    xai_core_entities::entities::EditControlEdit {
+                        initial_tweet_id: 1,
+                        edit_control_initial: None,
+                    },
+                )),
+                ..Default::default()
+            })
+            .build();
+        assert_drops(stale, &viewer(VIEWER_ID), &missing_initial, &reason);
         let stale_rt = candidate()
             .with_tweet_features(TweetFeatures {
                 edit_control: stale_edit_control(),
