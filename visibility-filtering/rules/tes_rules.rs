@@ -91,6 +91,37 @@ fn viewer_in_withheld_country(
         .any(|c| c.eq_ignore_ascii_case(viewer_country))
 }
 
+fn is_global_takedown_reason(reason: &TakedownReason) -> bool {
+    matches!(
+        reason,
+        TakedownReason::Dmca | TakedownReason::HatefulImagery | TakedownReason::Unknown
+    )
+}
+
+fn has_country_takedown_reason(reason: &TakedownReason) -> bool {
+    legal_takedown_country(reason).is_some() || local_laws_takedown_country(reason).is_some()
+}
+
+/// Post-level DMCA / hateful-imagery / unknown takedowns, or TES `has_takedown`
+/// with no country-scoped reason left for the geo rules.
+pub struct DropGlobalTakendownPostRule;
+
+impl Rule for DropGlobalTakendownPostRule {
+    fn name(&self) -> &'static str {
+        "DropGlobalTakendownPostRule"
+    }
+
+    fn evaluate(&self, context: &RuleContext<'_>) -> VfAction {
+        let takedown = &context.candidate().tweet_features.takedown;
+        let has_global_reason = takedown.reasons.iter().any(is_global_takedown_reason);
+        let has_country_reason = takedown.reasons.iter().any(has_country_takedown_reason);
+        if has_global_reason || (takedown.applied && !has_country_reason) {
+            return VfAction::Drop(FilteredReason::UnspecifiedReason);
+        }
+        VfAction::Allow
+    }
+}
+
 pub struct DropTweetsWithGeoRestrictedMediaRule;
 
 const WORLDWIDE_COUNTRY_CODE: &str = "xx";
@@ -451,6 +482,118 @@ mod tests {
         assert!(matches!(
             DropLocalLawsTakendownPostRule
                 .evaluate(&crate::rules::test_context(&viewer_with_country("de"), &c)),
+            VfAction::Allow
+        ));
+        assert!(matches!(
+            DropGlobalTakendownPostRule
+                .evaluate(&crate::rules::test_context(&viewer_with_country("de"), &c)),
+            VfAction::Drop(_)
+        ));
+    }
+
+    fn takedown_candidate(takedown: TakedownFeature) -> HydratedTweetCandidate {
+        HydratedTweetCandidate {
+            tweet_id: 1,
+            author_id: 100,
+            tweet_features: TweetFeatures {
+                takedown,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn global_takedown_drops_dmca() {
+        let c = takedown_candidate(TakedownFeature {
+            reasons: vec![TakedownReason::Dmca],
+            ..Default::default()
+        });
+        assert!(matches!(
+            DropGlobalTakendownPostRule.evaluate(&crate::rules::test_context(&viewer(), &c)),
+            VfAction::Drop(_)
+        ));
+    }
+
+    #[test]
+    fn global_takedown_drops_hateful_imagery() {
+        let c = takedown_candidate(TakedownFeature {
+            reasons: vec![TakedownReason::HatefulImagery],
+            ..Default::default()
+        });
+        assert!(matches!(
+            DropGlobalTakendownPostRule.evaluate(&crate::rules::test_context(&viewer(), &c)),
+            VfAction::Drop(_)
+        ));
+    }
+
+    #[test]
+    fn global_takedown_drops_unknown() {
+        let c = takedown_candidate(TakedownFeature {
+            reasons: vec![TakedownReason::Unknown],
+            ..Default::default()
+        });
+        assert!(matches!(
+            DropGlobalTakendownPostRule.evaluate(&crate::rules::test_context(&viewer(), &c)),
+            VfAction::Drop(_)
+        ));
+    }
+
+    #[test]
+    fn global_takedown_drops_applied_with_no_country_reason() {
+        let c = takedown_candidate(TakedownFeature {
+            applied: true,
+            reasons: vec![],
+        });
+        assert!(matches!(
+            DropGlobalTakendownPostRule.evaluate(&crate::rules::test_context(&viewer(), &c)),
+            VfAction::Drop(_)
+        ));
+    }
+
+    #[test]
+    fn global_takedown_allows_country_only_legal_request() {
+        let c = takedown_candidate(TakedownFeature {
+            applied: true,
+            reasons: vec![TakedownReason::LegalRequest {
+                country_code: "de".to_string(),
+            }],
+        });
+        assert!(matches!(
+            DropGlobalTakendownPostRule
+                .evaluate(&crate::rules::test_context(&viewer_with_country("us"), &c)),
+            VfAction::Allow
+        ));
+    }
+
+    #[test]
+    fn global_takedown_drops_even_for_author() {
+        let mut c = takedown_candidate(TakedownFeature {
+            reasons: vec![TakedownReason::Dmca],
+            ..Default::default()
+        });
+        c.author_id = 999;
+        assert!(matches!(
+            DropGlobalTakendownPostRule.evaluate(&crate::rules::test_context(&viewer(), &c)),
+            VfAction::Drop(_)
+        ));
+    }
+
+    #[test]
+    fn global_takedown_does_not_consume_media_dmca() {
+        let c = HydratedTweetCandidate {
+            tweet_id: 1,
+            tweet_features: TweetFeatures {
+                media: MediaFeature {
+                    has_dmca_media: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(matches!(
+            DropGlobalTakendownPostRule.evaluate(&crate::rules::test_context(&viewer(), &c)),
             VfAction::Allow
         ));
     }

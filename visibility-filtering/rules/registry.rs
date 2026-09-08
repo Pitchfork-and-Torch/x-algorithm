@@ -12,8 +12,8 @@ use crate::rules::socialgraph_rules::{
     DropExclusiveTweetContentRule, MutedRetweetsRule, ViewerBlocksAuthorRule, ViewerMutesAuthorRule,
 };
 use crate::rules::tes_rules::{
-    DropLegalTakendownPostRule, DropLocalLawsTakendownPostRule, DropStaleTweetsRule,
-    DropTweetsWithDmcaMediaRule, DropTweetsWithGeoRestrictedMediaRule,
+    DropGlobalTakendownPostRule, DropLegalTakendownPostRule, DropLocalLawsTakendownPostRule,
+    DropStaleTweetsRule, DropTweetsWithDmcaMediaRule, DropTweetsWithGeoRestrictedMediaRule,
 };
 use crate::rules::tweet_flag_rules as tweet_flag;
 use crate::rules::tweet_label_drops as tweet_label;
@@ -120,6 +120,7 @@ fn base_home_rules() -> Vec<Box<dyn Rule>> {
         Box::new(DropStaleTweetsRule),
         Box::new(DropLegalTakendownPostRule),
         Box::new(DropLocalLawsTakendownPostRule),
+        Box::new(DropGlobalTakendownPostRule),
         Box::new(SensitiveViewerLoggedOutDropRule),
         Box::new(SensitiveViewerUnderageDropRule),
         Box::new(SensitiveViewerNoStatedAgeDropRule),
@@ -173,7 +174,8 @@ fn timeline_home_recommendations_policy() -> Vec<Box<dyn Rule>> {
 mod tests {
     use super::*;
     use crate::models::{
-        HydratedTweetCandidate, MediaFeature, TweetFeatures, Viewer, ViewerFeatures,
+        HydratedTweetCandidate, MediaFeature, TakedownFeature, TweetFeatures, Viewer,
+        ViewerFeatures,
     };
     use std::collections::HashMap;
 
@@ -263,6 +265,72 @@ mod tests {
     }
 
     #[test]
+    fn post_level_dmca_drops_on_timeline_home() {
+        use xai_core_entities::entities::TakedownReason;
+        let policies = Policies::new();
+        let candidate = HydratedTweetCandidate {
+            tweet_id: 1,
+            tweet_features: TweetFeatures {
+                takedown: TakedownFeature {
+                    reasons: vec![TakedownReason::Dmca],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let viewer = ViewerFeatures::default();
+
+        let timeline_home = policies.evaluate(SafetyLevel::TimelineHome, &viewer, &candidate);
+        assert!(
+            matches!(timeline_home.action, VfAction::Drop(_)),
+            "post-level DMCA must drop on TimelineHome, got {:?}",
+            timeline_home.action
+        );
+        assert_eq!(
+            timeline_home.decided_by,
+            Some("DropGlobalTakendownPostRule")
+        );
+
+        let recommendations = policies.evaluate(
+            SafetyLevel::TimelineHomeRecommendations,
+            &viewer,
+            &candidate,
+        );
+        assert!(matches!(recommendations.action, VfAction::Drop(_)));
+        assert_eq!(
+            recommendations.decided_by,
+            Some("DropGlobalTakendownPostRule")
+        );
+    }
+
+    fn tes_has_takedown_applied_drops_on_timeline_home() {
+        let policies = Policies::new();
+        let candidate = HydratedTweetCandidate {
+            tweet_id: 1,
+            tweet_features: TweetFeatures {
+                takedown: TakedownFeature {
+                    applied: true,
+                    reasons: vec![],
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let verdict = policies.evaluate(
+            SafetyLevel::TimelineHome,
+            &ViewerFeatures::default(),
+            &candidate,
+        );
+        assert!(
+            matches!(verdict.action, VfAction::Drop(_)),
+            "TES has_takedown with no country reason must drop, got {:?}",
+            verdict.action
+        );
+        assert_eq!(verdict.decided_by, Some("DropGlobalTakendownPostRule"));
+    }
+
     fn dmca_media_drops_recommendations_only() {
         let policies = Policies::new();
         let candidate = HydratedTweetCandidate {
