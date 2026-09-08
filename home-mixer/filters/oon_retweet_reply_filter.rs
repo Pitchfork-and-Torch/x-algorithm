@@ -13,8 +13,8 @@ impl Filter<ScoredPostsQuery, PostCandidate> for OONRetweetReplyFilter {
         let (removed, kept): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|c| {
             let is_reply = c.in_reply_to_tweet_id.is_some();
             let is_retweet = c.retweeted_tweet_id.is_some();
-            (c.in_network == Some(false) && (is_retweet || is_reply))
-                || (is_reply && c.ancestors.is_empty())
+            // Empty ancestors is a Phoenix producer gap, not an OON signal.
+            c.in_network == Some(false) && (is_retweet || is_reply)
         });
 
         FilterResult { kept, removed }
@@ -43,7 +43,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drops_oon_retweets_replies_and_replies_missing_ancestors() {
+    async fn drops_oon_retweets_and_replies_only() {
         let filter = OONRetweetReplyFilter;
         let query = ScoredPostsQuery::default();
 
@@ -62,10 +62,36 @@ mod tests {
         let result = filter.filter(&query, candidates);
 
         let removed_ids: Vec<u64> = result.removed.iter().map(|c| c.tweet_id).collect();
-        assert_eq!(removed_ids, vec![1, 2, 8, 9]);
+        assert_eq!(removed_ids, vec![1, 2]);
 
         let kept_ids: Vec<u64> = result.kept.iter().map(|c| c.tweet_id).collect();
-        assert_eq!(kept_ids, vec![3, 4, 5, 6, 7]);
+        assert_eq!(kept_ids, vec![3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[tokio::test]
+    async fn keeps_in_network_phoenix_reply_when_ancestors_empty() {
+        let filter = OONRetweetReplyFilter;
+        let query = ScoredPostsQuery::default();
+        let result = filter.filter(
+            &query,
+            vec![candidate(8, None, Some(800), vec![], Some(true))],
+        );
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.kept[0].tweet_id, 8);
+        assert!(result.removed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn still_drops_oon_reply_even_when_ancestors_present() {
+        let filter = OONRetweetReplyFilter;
+        let query = ScoredPostsQuery::default();
+        let result = filter.filter(
+            &query,
+            vec![candidate(2, None, Some(200), vec![200], Some(false))],
+        );
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].tweet_id, 2);
+        assert!(result.kept.is_empty());
     }
 
     #[tokio::test]
@@ -104,6 +130,12 @@ mod tests {
                 ancestors: vec![300],
                 ..Default::default()
             },
+            PostCandidate {
+                tweet_id: 13,
+                author_id: 2,
+                in_reply_to_tweet_id: Some(400),
+                ..Default::default()
+            },
         ];
 
         let hydrator = InNetworkCandidateHydrator;
@@ -114,11 +146,12 @@ mod tests {
         assert_eq!(candidates[0].in_network, Some(false));
         assert_eq!(candidates[1].in_network, Some(false));
         assert_eq!(candidates[2].in_network, Some(true));
+        assert_eq!(candidates[3].in_network, Some(true));
 
         let result = OONRetweetReplyFilter.filter(&query, candidates);
         let removed_ids: Vec<u64> = result.removed.iter().map(|c| c.tweet_id).collect();
         assert_eq!(removed_ids, vec![10, 11]);
-        assert_eq!(result.kept.len(), 1);
-        assert_eq!(result.kept[0].tweet_id, 12);
+        let kept_ids: Vec<u64> = result.kept.iter().map(|c| c.tweet_id).collect();
+        assert_eq!(kept_ids, vec![12, 13]);
     }
 }
