@@ -78,20 +78,23 @@ impl Policy {
 
 static FILTER_ALL_POLICY: Policy = Policy::new(&[tweet_rules::FILTER_ALL]);
 
-static TIMELINE_HOME_SHARED_RULES: [&[RuleSpec]; 9] = [
+static TIMELINE_HOME_SHARED_RULES: [&[RuleSpec]; 10] = [
     author_rules::AUTHOR_STATE_DROPS,
     author_rules::SOCIALGRAPH_DROPS,
     tweet_rules::TWEET_LABEL_DROPS,
     tweet_rules::NULLCAST_DROP,
     tweet_rules::TES_HOME_DROPS,
+    // TES media legal/geo drops. Sibling of TES_HOME_DROPS (post-level legal
+    // / local-law takedown). Not an OON-only quality filter: DMCA media and
+    // licensed geo lists apply to Following and For You followee cards too.
+    tweet_rules::RECS_MEDIA_DROPS,
     tweet_rules::SENSITIVE_VIEWER_DROPS,
     tweet_rules::EXCLUSIVE_TWEET_DROP,
     tweet_rules::NSFW_MEDIA_INTERSTITIALS,
     tweet_rules::NSFW_AUTHOR_INTERSTITIAL,
 ];
 
-static TIMELINE_HOME_RECOMMENDATION_ONLY_RULES: [&[RuleSpec]; 5] = [
-    tweet_rules::RECS_MEDIA_DROPS,
+static TIMELINE_HOME_RECOMMENDATION_ONLY_RULES: [&[RuleSpec]; 4] = [
     author_rules::OON_NSFW_AUTHOR_DROPS,
     tweet_rules::OON_TWEET_FLAG_DROPS,
     tweet_rules::OON_TWEET_LABEL_DROPS,
@@ -154,7 +157,7 @@ impl RuleEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{VfAction, ViewerFeatures};
+    use crate::models::{MediaFeature, TweetFeatures, VfAction, ViewerFeatures};
     use crate::rules::fixtures::{candidate, viewer, VIEWER_ID};
 
     #[test]
@@ -226,6 +229,8 @@ rust_vf:
                 "DropStaleTweetsRule",
                 "DropLegalTakendownPostRule",
                 "DropLocalLawsTakendownPostRule",
+                "DropTweetsWithDmcaMediaRule",
+                "DropTweetsWithGeoRestrictedMediaRule",
                 "SensitiveViewerLoggedOutDropRule",
                 "SensitiveViewerUnderageDropRule",
                 "SensitiveViewerNoStatedAgeDropRule",
@@ -238,8 +243,6 @@ rust_vf:
         );
         let mut recs = home.clone();
         recs.extend([
-            "DropTweetsWithDmcaMediaRule",
-            "DropTweetsWithGeoRestrictedMediaRule",
             "DropNsfwUserAuthorRule",
             "DropNsfwAdminAuthorRule",
             "TweetNsfwUserDropRule",
@@ -268,6 +271,55 @@ rust_vf:
         assert_eq!(
             rule_engine.wired_rule_names(SafetyLevel::TimelineHomeRecommendations),
             recs
+        );
+    }
+
+    #[test]
+    fn legal_media_drops_on_timeline_home() {
+        let rule_engine = RuleEngine::for_tests();
+        let dmca = candidate()
+            .with_tweet_features(TweetFeatures {
+                media: MediaFeature {
+                    has_dmca_media: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .build();
+        let dmca_verdict =
+            rule_engine.evaluate(SafetyLevel::TimelineHome, &viewer(VIEWER_ID), &dmca);
+        assert!(
+            matches!(dmca_verdict.action, VfAction::Drop(_)),
+            "TimelineHome must drop DMCA media, got {:?}",
+            dmca_verdict.action
+        );
+        assert_eq!(
+            dmca_verdict.decided_by,
+            Some("DropTweetsWithDmcaMediaRule")
+        );
+
+        let geo = candidate()
+            .with_tweet_features(TweetFeatures {
+                media: MediaFeature {
+                    geo_deny_list: vec!["de".to_string()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .build();
+        let de_viewer = ViewerFeatures {
+            country_code: Some("de".into()),
+            ..viewer(VIEWER_ID)
+        };
+        let geo_verdict = rule_engine.evaluate(SafetyLevel::TimelineHome, &de_viewer, &geo);
+        assert!(
+            matches!(geo_verdict.action, VfAction::Drop(_)),
+            "TimelineHome must drop geo-denied media, got {:?}",
+            geo_verdict.action
+        );
+        assert_eq!(
+            geo_verdict.decided_by,
+            Some("DropTweetsWithGeoRestrictedMediaRule")
         );
     }
 
