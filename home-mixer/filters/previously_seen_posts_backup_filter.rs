@@ -88,4 +88,25 @@ mod tests {
         assert!(result.kept.is_empty());
         assert!(result.removed.is_empty());
     }
+
+    #[test]
+    fn test_filters_quote_of_impressed_original() {
+        let query = ScoredPostsQuery {
+            impressed_post_ids: vec![99],
+            ..Default::default()
+        };
+
+        let quote = PostCandidate {
+            tweet_id: 7,
+            quoted_tweet_id: Some(99),
+            ..Default::default()
+        };
+        let unrelated = make_candidate(8);
+
+        let result = PreviouslySeenPostsBackupFilter.filter(&query, vec![quote, unrelated]);
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.kept[0].tweet_id, 8);
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].tweet_id, 7);
+    }
 }

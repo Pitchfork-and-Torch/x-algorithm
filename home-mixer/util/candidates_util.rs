@@ -7,6 +7,7 @@ pub fn get_related_post_ids(candidate: &PostCandidate) -> Vec<u64> {
     let mut ids = vec![candidate.tweet_id];
     ids.extend(candidate.retweeted_tweet_id);
     ids.extend(candidate.in_reply_to_tweet_id);
+    ids.extend(candidate.quoted_tweet_id);
     ids
 }
 
@@ -14,6 +15,7 @@ pub fn related_post_ids_iter(candidate: &PostCandidate) -> impl Iterator<Item = 
     std::iter::once(candidate.tweet_id)
         .chain(candidate.retweeted_tweet_id)
         .chain(candidate.in_reply_to_tweet_id)
+        .chain(candidate.quoted_tweet_id)
 }
 
 pub fn vqv_weight(
@@ -106,5 +108,33 @@ mod tests {
             ..Default::default()
         };
         assert!((quoted_vqv_weight(&candidate, 10_000, 0.5, true)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn related_ids_include_quoted_tweet_as_same_card() {
+        let candidate = PostCandidate {
+            tweet_id: 10,
+            retweeted_tweet_id: Some(20),
+            in_reply_to_tweet_id: Some(30),
+            quoted_tweet_id: Some(40),
+            ..Default::default()
+        };
+        assert_eq!(
+            related_post_ids_iter(&candidate).collect::<Vec<_>>(),
+            vec![10, 20, 30, 40]
+        );
+        assert_eq!(get_related_post_ids(&candidate), vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn related_ids_skip_absent_quote() {
+        let candidate = PostCandidate {
+            tweet_id: 10,
+            ..Default::default()
+        };
+        assert_eq!(
+            related_post_ids_iter(&candidate).collect::<Vec<_>>(),
+            vec![10]
+        );
     }
 }
