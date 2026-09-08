@@ -226,6 +226,7 @@ rust_vf:
                 "DropStaleTweetsRule",
                 "DropLegalTakendownPostRule",
                 "DropLocalLawsTakendownPostRule",
+                "DropGlobalTakendownPostRule",
                 "SensitiveViewerLoggedOutDropRule",
                 "SensitiveViewerUnderageDropRule",
                 "SensitiveViewerNoStatedAgeDropRule",

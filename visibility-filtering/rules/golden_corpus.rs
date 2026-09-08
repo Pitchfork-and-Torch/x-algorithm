@@ -621,6 +621,30 @@ fn tweet_shape_cases() -> Vec<Case> {
             expected_action: Allow,
             expected_decided_by: None,
         },
+        Case {
+            name: "hateful_imagery_takedown_drops_for_any_viewer",
+            level: TimelineHome,
+            viewer: viewer(VIEWER_ID),
+            candidate: takedown_candidate(TakedownReason::HatefulImagery),
+            expected_action: Drop(FilteredReason::UnspecifiedReason),
+            expected_decided_by: Some("DropGlobalTakendownPostRule"),
+        },
+        Case {
+            name: "unknown_takedown_drops_for_any_viewer",
+            level: TimelineHomeRecommendations,
+            viewer: viewer(VIEWER_ID),
+            candidate: takedown_candidate(TakedownReason::Unknown),
+            expected_action: Drop(FilteredReason::UnspecifiedReason),
+            expected_decided_by: Some("DropGlobalTakendownPostRule"),
+        },
+        Case {
+            name: "hateful_imagery_takedown_allows_author",
+            level: TimelineHome,
+            viewer: author_viewer(),
+            candidate: takedown_candidate(TakedownReason::HatefulImagery),
+            expected_action: Allow,
+            expected_decided_by: None,
+        },
     ]
 }
 

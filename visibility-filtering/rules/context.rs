@@ -257,6 +257,23 @@ impl TakedownPredicates<'_> {
         self.in_viewer_country(local_laws_takedown_country)
     }
 
+    /// TES global takedowns that are not country-coded and are not the DMCA
+    /// arm already consumed by `legal_in_viewer_country`.
+    #[inline]
+    pub fn is_global(&self) -> bool {
+        self.ctx
+            .candidate
+            .tweet_features
+            .takedown_reasons
+            .iter()
+            .any(|reason| {
+                matches!(
+                    reason,
+                    TakedownReason::HatefulImagery | TakedownReason::Unknown
+                )
+            })
+    }
+
     #[inline]
     fn in_viewer_country(&self, extractor: fn(&TakedownReason) -> Option<&str>) -> bool {
         let viewer_country = self.ctx.viewer.country_code.as_deref();

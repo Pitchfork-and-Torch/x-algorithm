@@ -270,6 +270,13 @@ fn drop_local_laws_takendown_post(context: &RuleContext<'_>) -> VfAction {
     VfAction::Allow
 }
 
+fn drop_global_takendown_post(context: &RuleContext<'_>) -> VfAction {
+    if !context.viewer().is_author() && context.takedown().is_global() {
+        return VfAction::Drop(FilteredReason::UnspecifiedReason);
+    }
+    VfAction::Allow
+}
+
 fn drop_geo_restricted_media(context: &RuleContext<'_>) -> VfAction {
     if context.takedown().media_restricted_in_viewer_country() {
         VfAction::Drop(FilteredReason::UnspecifiedReason)
@@ -292,6 +299,10 @@ pub(super) const TES_HOME_DROPS: &[RuleSpec] = &[
     RuleSpec::Custom {
         name: "DropLocalLawsTakendownPostRule",
         evaluate: drop_local_laws_takendown_post,
+    },
+    RuleSpec::Custom {
+        name: "DropGlobalTakendownPostRule",
+        evaluate: drop_global_takendown_post,
     },
 ];
 
@@ -865,6 +876,9 @@ mod tests {
         ]);
         assert_allows(legal, &viewer_with_country("de"), &non_country);
         assert_allows(local, &viewer_with_country("de"), &non_country);
+        let global = tes_spec("DropGlobalTakendownPostRule");
+        assert_drops(global, &viewer_with_country("de"), &non_country, &reason);
+        assert_drops(global, &viewer(VIEWER_ID), &non_country, &reason);
     }
 
     #[test]
@@ -908,6 +922,18 @@ mod tests {
         let mut author_dmca = dmca.clone();
         author_dmca.author_id = VIEWER_ID;
         assert_allows(legal, &viewer(VIEWER_ID), &author_dmca);
+
+        let global = tes_spec("DropGlobalTakendownPostRule");
+        assert_allows(global, &viewer(VIEWER_ID), &dmca);
+        let hateful = takedown_candidate(vec![TakedownReason::HatefulImagery]);
+        assert_drops(global, &viewer_with_country("de"), &hateful, &reason);
+        assert_drops(global, &viewer(VIEWER_ID), &hateful, &reason);
+        assert_allows(legal, &viewer(VIEWER_ID), &hateful);
+        let unknown = takedown_candidate(vec![TakedownReason::Unknown]);
+        assert_drops(global, &viewer(VIEWER_ID), &unknown, &reason);
+        let mut author_hateful = hateful.clone();
+        author_hateful.author_id = VIEWER_ID;
+        assert_allows(global, &viewer(VIEWER_ID), &author_hateful);
     }
 
     #[test]
