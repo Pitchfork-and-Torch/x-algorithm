@@ -57,6 +57,19 @@ where
         }
     }
 
+    /// Write-back after `join_all`. Hydrators hydrate from one shared snapshot,
+    /// then `run_hydrators` applies each write in vec order. Override when the
+    /// stamp must read a field another hydrator just wrote.
+    fn apply_hydration(
+        &self,
+        query: &Q,
+        candidates: &mut [C],
+        hydrated: Vec<Result<C, String>>,
+    ) {
+        let _ = query;
+        self.update_all(candidates, hydrated);
+    }
+
     fn name(&self) -> &'static str {
         util::short_type_name(type_name_of_val(self))
     }

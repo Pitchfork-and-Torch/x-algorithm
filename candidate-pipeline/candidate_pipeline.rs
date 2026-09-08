@@ -306,7 +306,7 @@ where
         let hydrate_futures = enabled.iter().map(|h| h.run(query, &candidates));
         let results = join_all(hydrate_futures).await;
         for (hydrator, result) in enabled.iter().zip(results) {
-            hydrator.update_all(&mut candidates, result);
+            hydrator.apply_hydration(query, &mut candidates, result);
         }
         stats.finish_with_size(candidates.len());
         candidates
