@@ -111,6 +111,8 @@ fn relationship_select_request(viewer_id: u64, destination_ids: &[i64]) -> Selec
     }
 }
 
+const RELATIONSHIP_GRAPH_SLOTS: usize = 4;
+
 fn next_edge_set(results: &mut impl Iterator<Item = Results>) -> HashSet<u64> {
     results
         .next()
@@ -118,14 +120,22 @@ fn next_edge_set(results: &mut impl Iterator<Item = Results>) -> HashSet<u64> {
         .unwrap_or_default()
 }
 
-fn decode_relationship_edges(results: impl IntoIterator<Item = Results>) -> RelationshipEdges {
+/// Four Flock result slots, in request order: follows, blocks, mutes, mute-retweets.
+/// Fewer (or extra) slots used to decode as empty mute/block sets (fail-open).
+fn decode_relationship_edges(
+    results: impl IntoIterator<Item = Results>,
+) -> Option<RelationshipEdges> {
+    let results: Vec<Results> = results.into_iter().collect();
+    if results.len() != RELATIONSHIP_GRAPH_SLOTS {
+        return None;
+    }
     let mut results = results.into_iter();
-    RelationshipEdges {
+    Some(RelationshipEdges {
         follows: next_edge_set(&mut results),
         blocks: next_edge_set(&mut results),
         mutes: next_edge_set(&mut results),
         mute_retweets: next_edge_set(&mut results),
-    }
+    })
 }
 
 async fn select_edge_set(
@@ -186,7 +196,15 @@ impl SocialgraphClient for ProdSocialgraphClient {
         let request = relationship_select_request(viewer_id, &dest_ids);
 
         let edges = match self.flock_client.inner().clone().select(request).await {
-            Ok(resp) => decode_relationship_edges(resp.into_inner().results),
+            Ok(resp) => match decode_relationship_edges(resp.into_inner().results) {
+                Some(edges) => edges,
+                None => {
+                    warn!(
+                        "FlockDB multi-query select returned incomplete graph slots, returning no relationships"
+                    );
+                    return HashMap::new();
+                }
+            },
             Err(e) => {
                 warn!(
                     error = %e,
@@ -299,8 +317,13 @@ mod tests {
                 prev_cursor: 0,
             }
         };
-        let edges =
-            decode_relationship_edges([pack(&[1, 2]), pack(&[3]), pack(&[]), pack(&[4, 5, 6])]);
+        let edges = decode_relationship_edges([
+            pack(&[1, 2]),
+            pack(&[3]),
+            pack(&[]),
+            pack(&[4, 5, 6]),
+        ])
+        .expect("four slots decode");
         assert!(edges.follows.contains(&1) && edges.follows.contains(&2));
         assert!(edges.blocks.contains(&3));
         assert!(edges.mutes.is_empty());
@@ -309,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_relationship_edges_missing_slots_fail_open() {
+    fn decode_relationship_edges_four_empty_slots_is_confirmed_none() {
         let pack = |ids: &[i64]| -> Results {
             Results {
                 ids: ids.iter().flat_map(|id| id.to_le_bytes()).collect(),
@@ -317,13 +340,35 @@ mod tests {
                 prev_cursor: 0,
             }
         };
-        let edges = decode_relationship_edges([pack(&[1])]);
-        assert_eq!(
-            edges,
-            RelationshipEdges {
-                follows: HashSet::from([1]),
-                ..RelationshipEdges::default()
+        let edges = decode_relationship_edges([pack(&[]), pack(&[]), pack(&[]), pack(&[])])
+            .expect("four empty slots are a successful unlabeled read");
+        assert_eq!(edges, RelationshipEdges::default());
+    }
+
+    #[test]
+    fn decode_relationship_edges_missing_slots_fail_closed() {
+        let pack = |ids: &[i64]| -> Results {
+            Results {
+                ids: ids.iter().flat_map(|id| id.to_le_bytes()).collect(),
+                next_cursor: 0,
+                prev_cursor: 0,
             }
+        };
+        assert_eq!(decode_relationship_edges([pack(&[1])]), None);
+        assert_eq!(
+            decode_relationship_edges([pack(&[1]), pack(&[2]), pack(&[3])]),
+            None
         );
+        assert_eq!(
+            decode_relationship_edges([
+                pack(&[1]),
+                pack(&[2]),
+                pack(&[3]),
+                pack(&[4]),
+                pack(&[5])
+            ]),
+            None
+        );
+        assert_eq!(decode_relationship_edges([]), None);
     }
 }
