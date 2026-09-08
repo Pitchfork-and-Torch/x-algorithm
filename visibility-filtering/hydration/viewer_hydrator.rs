@@ -49,11 +49,7 @@ impl ViewerHydrator {
                 );
                 match result {
                     Ok(Ok(data)) => {
-                        let age = match data.age_in_years {
-                            Some(age) => ViewerAge::Known(age),
-                            None if data.user_exists => ViewerAge::NotStated,
-                            None => ViewerAge::Unknown,
-                        };
+                        let age = classify_viewer_age(data.age_in_years, data.user_exists);
                         (
                             data.nsfw_view.unwrap_or(false),
                             age,
@@ -80,6 +76,20 @@ impl ViewerHydrator {
             account_country_code: account_country_code.map(|c| c.to_ascii_lowercase()),
             viewer_age,
         }
+    }
+}
+
+/// Gizmoduck `age_in_years` uses `0` (and other non-positives) as "no usable
+/// birthday", the same sentinel home-mixer / Phoenix already treat as missing.
+/// Mapping that to `Known(0)` makes `viewer_is_underage` true worldwide and
+/// hard-drops all sensitive media. Missing / invalid age on an existing user
+/// is `NotStated` (jurisdiction-scoped). A failed existence check stays
+/// `Unknown` (fail open), matching RPC error / timeout.
+pub(crate) fn classify_viewer_age(age_in_years: Option<i32>, user_exists: bool) -> ViewerAge {
+    match age_in_years {
+        Some(age) if age > 0 => ViewerAge::Known(age),
+        _ if user_exists => ViewerAge::NotStated,
+        _ => ViewerAge::Unknown,
     }
 }
 
@@ -228,6 +238,46 @@ mod tests {
 
         assert_eq!(viewer.account_country_code.as_deref(), Some("kr"));
         assert_eq!(viewer.country_code.as_deref(), Some("us"));
+    }
+
+    #[test]
+    fn zero_age_on_existing_user_is_not_stated() {
+        assert_eq!(classify_viewer_age(Some(0), true), ViewerAge::NotStated);
+        assert_eq!(classify_viewer_age(Some(-3), true), ViewerAge::NotStated);
+        assert_eq!(classify_viewer_age(None, true), ViewerAge::NotStated);
+    }
+
+    #[test]
+    fn zero_age_on_missing_user_is_unknown() {
+        assert_eq!(classify_viewer_age(Some(0), false), ViewerAge::Unknown);
+        assert_eq!(classify_viewer_age(None, false), ViewerAge::Unknown);
+    }
+
+    #[test]
+    fn positive_age_is_known() {
+        assert_eq!(classify_viewer_age(Some(15), true), ViewerAge::Known(15));
+        assert_eq!(classify_viewer_age(Some(18), false), ViewerAge::Known(18));
+    }
+
+    #[tokio::test]
+    async fn gizmoduck_zero_age_is_not_stated() {
+        let hydrator = hydrator_with_viewer_data(
+            123,
+            ViewerData {
+                user_exists: true,
+                nsfw_view: Some(false),
+                age_in_years: Some(0),
+                ..Default::default()
+            },
+        );
+
+        let viewer = hydrator
+            .hydrate(Some(123), Some("US".to_string()), SafetyLevel::FilterAll)
+            .await;
+
+        assert_eq!(viewer.viewer_age, ViewerAge::NotStated);
+        assert!(!viewer.viewer_is_underage());
+        assert!(viewer.viewer_has_no_stated_age());
     }
 
     #[tokio::test]
