@@ -104,7 +104,18 @@ object UserCredV2App extends Logging {
       .readMostRecentSnapshotNoOlderThan(AccountExpansionInvestigationsScalaDataset, Days(7))
       .withRemoteReadPolicy(ExplicitLocation(ProcAtla))
       .toTypedPipe
-      .map(row => (row.userId, row.linkedUserId))
+      .flatMap(row => undirectedLinkedPairs(row.userId, row.linkedUserId))
+  }
+
+  // Investigations stores an undirected linked-account pair. Joining only
+  // (userId, linkedUserId) drops main→alt and keeps alt→main — the PageRank
+  // boosting direction (mass flows follower→followee / engager→author).
+  private[user_cred_v2] def undirectedLinkedPairs(
+    userId: Long,
+    linkedUserId: Long,
+  ): Seq[(Long, Long)] = {
+    if (userId == linkedUserId) Seq.empty
+    else Seq((userId, linkedUserId), (linkedUserId, userId))
   }
 
   private[user_cred_v2] def filterLinkedUserEdges(
