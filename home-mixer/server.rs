@@ -146,6 +146,7 @@ impl QueryBuilder {
         query.resurrection_time_ms = resurrection_time_ms;
 
         query.dsp_client_context = proto_query.dsp_client_context;
+        apply_content_controls(&mut query, &proto_query);
 
         let root_span = b3_info.root_span(info_span!(
             "request",
@@ -263,6 +264,13 @@ impl QueryBuilder {
             resurrection_date_client: Arc::new(MockResurrectionDateClient),
         }
     }
+}
+
+fn apply_content_controls(query: &mut ScoredPostsQuery, proto_query: &pb::ScoredPostsQuery) {
+    query.hide_replies = proto_query.hide_replies;
+    query.hide_links = proto_query.hide_links;
+    query.exclude_replies = proto_query.exclude_replies;
+    query.exclude_retweets = proto_query.exclude_retweets;
 }
 
 pub struct HomeMixerServer {

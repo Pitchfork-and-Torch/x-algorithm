@@ -13,7 +13,6 @@ use xai_candidate_pipeline::source::Source;
 use xai_home_mixer_proto::ServedType;
 use xai_urt_thrift::operation::CursorType;
 
-const BASE_FILTERS: &str = "filter:follows include:retweets include:protected include:spam";
 const MAX_RESULTS: u32 = FOLLOWING_POST_FETCH_SIZE as u32;
 const COLLECTOR_TIMEOUT_MS: u32 = 300;
 const RECALL_MAX_AGE_SECS: i64 = 365 * 24 * 60 * 60;
@@ -84,19 +83,36 @@ fn build_request(query: &ScoredPostsQuery) -> Result<night_owl::SearchRequest, S
     })
 }
 
-fn base_query(request_time_ms: i64) -> String {
-    let now_secs = request_time_ms / 1000;
+fn night_owl_operators(query: &ScoredPostsQuery) -> String {
+    let retweets = if query.hides_retweets() {
+        "-filter:nativeretweets"
+    } else {
+        "include:retweets"
+    };
+    let mut operators = format!("filter:follows {retweets} include:protected include:spam");
+    if query.hides_replies() {
+        operators.push_str(" -filter:replies");
+    }
+    if query.hides_links() {
+        operators.push_str(" -filter:links");
+    }
+    operators
+}
+
+fn base_query(query: &ScoredPostsQuery) -> String {
+    let operators = night_owl_operators(query);
+    let now_secs = query.request_time_ms / 1000;
     if now_secs <= 0 {
-        return BASE_FILTERS.to_string();
+        return operators;
     }
     format!(
-        "{BASE_FILTERS} since_time:{}",
+        "{operators} since_time:{}",
         (now_secs - RECALL_MAX_AGE_SECS).max(0)
     )
 }
 
 fn pagination_for_cursor(query: &ScoredPostsQuery) -> Result<(String, Pagination), String> {
-    let base = base_query(query.request_time_ms);
+    let base = base_query(query);
 
     let Some(cursor) = query.cursor.as_ref() else {
         return Ok((base, from_size_pagination()));
@@ -218,5 +234,74 @@ fn hit_to_post_candidate(hit: night_owl::SearchHit) -> PostCandidate {
             .map(|d| d.text.clone().unwrap_or_default())
             .unwrap_or_default(),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_operators_still_include_retweets() {
+        let query = ScoredPostsQuery::default();
+        assert_eq!(
+            night_owl_operators(&query),
+            "filter:follows include:retweets include:protected include:spam"
+        );
+    }
+
+    #[test]
+    fn hide_replies_adds_filter() {
+        let query = ScoredPostsQuery {
+            hide_replies: true,
+            ..Default::default()
+        };
+        let operators = night_owl_operators(&query);
+        assert!(operators.contains("-filter:replies"));
+        assert!(operators.contains("include:retweets"));
+        assert!(!operators.contains("-filter:links"));
+    }
+
+    #[test]
+    fn exclude_replies_alias_adds_filter() {
+        let query = ScoredPostsQuery {
+            exclude_replies: true,
+            ..Default::default()
+        };
+        assert!(night_owl_operators(&query).contains("-filter:replies"));
+    }
+
+    #[test]
+    fn hide_links_adds_filter() {
+        let query = ScoredPostsQuery {
+            hide_links: true,
+            ..Default::default()
+        };
+        assert!(night_owl_operators(&query).contains("-filter:links"));
+    }
+
+    #[test]
+    fn exclude_retweets_replaces_include_retweets() {
+        let query = ScoredPostsQuery {
+            exclude_retweets: true,
+            ..Default::default()
+        };
+        let operators = night_owl_operators(&query);
+        assert!(operators.contains("-filter:nativeretweets"));
+        assert!(!operators.contains("include:retweets"));
+    }
+
+    #[test]
+    fn all_content_controls_compose() {
+        let query = ScoredPostsQuery {
+            hide_replies: true,
+            hide_links: true,
+            exclude_retweets: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            night_owl_operators(&query),
+            "filter:follows -filter:nativeretweets include:protected include:spam -filter:replies -filter:links"
+        );
     }
 }

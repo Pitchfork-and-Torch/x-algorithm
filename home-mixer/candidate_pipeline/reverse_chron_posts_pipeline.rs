@@ -10,6 +10,7 @@ use crate::clients::s2s::{S2S_CHAIN_PATH, S2S_CRT_PATH, S2S_KEY_PATH};
 use crate::clients::tweet_entity_service_client::{MockTESClient, ProdTESClient, TESClient};
 use crate::filters::ancillary_vf_filter::AncillaryVFFilter;
 use crate::filters::author_socialgraph_filter::AuthorSocialgraphFilter;
+use crate::filters::following_content_controls_filter::FollowingContentControlsFilter;
 use crate::filters::following_retweet_deduplication_filter::FollowingRetweetDeduplicationFilter;
 use crate::filters::following_viewer_muted_keyword_filter::FollowingViewerMutedKeywordFilter;
 use crate::filters::self_reply_chain_filter::SelfReplyChainFilter;
@@ -162,6 +163,7 @@ impl ReverseChronPostsPipeline {
             Box::new(FollowingRetweetDeduplicationFilter),
             Box::new(FollowingViewerMutedKeywordFilter::new()),
             Box::new(SelfReplyChainFilter),
+            Box::new(FollowingContentControlsFilter),
         ];
 
         let post_selection_hydrators: Vec<Box<dyn Hydrator<ScoredPostsQuery, PostCandidate>>> = vec![
@@ -234,5 +236,16 @@ impl CandidatePipeline<ScoredPostsQuery, PostCandidate> for ReverseChronPostsPip
 
     fn result_size(&self) -> usize {
         FOLLOWING_POST_FETCH_SIZE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mock_pipeline_wires_content_controls_filter() {
+        let pipeline = ReverseChronPostsPipeline::mock().await;
+        assert_eq!(pipeline.filters().len(), 4);
     }
 }
