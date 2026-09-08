@@ -14,7 +14,7 @@ pub struct BidirectionalFollowHydrator {
 #[async_trait]
 impl Hydrator<ScoredPostsQuery, PostCandidate> for BidirectionalFollowHydrator {
     fn enable(&self, query: &ScoredPostsQuery) -> bool {
-        query.params.get(EnableBidirectionalFollowHydration) && !query.has_cached_posts
+        query.params.get(EnableBidirectionalFollowHydration)
     }
 
     async fn hydrate(
@@ -205,11 +205,70 @@ mod tests {
     }
 
     #[test]
-    fn disabled_for_cached_posts() {
+    fn enabled_on_cache_hit_and_miss() {
         let hydrator = hydrator(vec![]);
         let mut q = query(vec![1], true);
         assert!(hydrator.enable(&q));
         q.has_cached_posts = true;
-        assert!(!hydrator.enable(&q));
+        assert!(hydrator.enable(&q));
+    }
+
+    fn apply_update(
+        hydrator: &BidirectionalFollowHydrator,
+        candidate: &mut PostCandidate,
+        hydrated: PostCandidate,
+    ) {
+        hydrator.update(candidate, hydrated);
+    }
+
+    #[tokio::test]
+    async fn cache_hit_clears_stale_mutual_when_author_unfollowed_viewer() {
+        let hydrator = hydrator(vec![]);
+        let mut q = query(vec![2], true);
+        q.has_cached_posts = true;
+        let mut cached = PostCandidate {
+            author_id: 2,
+            is_mutual_follow_author: Some(true),
+            ..Default::default()
+        };
+
+        let out = hydrator.hydrate(&q, &[cached.clone()]).await;
+        apply_update(&hydrator, &mut cached, out[0].as_ref().unwrap().clone());
+
+        assert_eq!(cached.is_mutual_follow_author, Some(false));
+    }
+
+    #[tokio::test]
+    async fn cache_hit_clears_stale_mutual_when_viewer_unfollowed() {
+        let hydrator = hydrator(vec![2]);
+        let mut q = query(vec![], true);
+        q.has_cached_posts = true;
+        let mut cached = PostCandidate {
+            author_id: 2,
+            is_mutual_follow_author: Some(true),
+            ..Default::default()
+        };
+
+        let out = hydrator.hydrate(&q, &[cached.clone()]).await;
+        apply_update(&hydrator, &mut cached, out[0].as_ref().unwrap().clone());
+
+        assert_eq!(cached.is_mutual_follow_author, Some(false));
+    }
+
+    #[tokio::test]
+    async fn cache_hit_sets_newly_mutual_follow_bit() {
+        let hydrator = hydrator(vec![2]);
+        let mut q = query(vec![2], true);
+        q.has_cached_posts = true;
+        let mut cached = PostCandidate {
+            author_id: 2,
+            is_mutual_follow_author: Some(false),
+            ..Default::default()
+        };
+
+        let out = hydrator.hydrate(&q, &[cached.clone()]).await;
+        apply_update(&hydrator, &mut cached, out[0].as_ref().unwrap().clone());
+
+        assert_eq!(cached.is_mutual_follow_author, Some(true));
     }
 }
