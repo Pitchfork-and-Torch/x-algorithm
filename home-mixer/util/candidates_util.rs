@@ -4,16 +4,11 @@ use crate::models::query::ScoredPostsQuery;
 const MAX_FOLLOWERS_THRESHOLD: i64 = 10_000;
 
 pub fn get_related_post_ids(candidate: &PostCandidate) -> Vec<u64> {
-    let mut ids = vec![candidate.tweet_id];
-    ids.extend(candidate.retweeted_tweet_id);
-    ids.extend(candidate.in_reply_to_tweet_id);
-    ids
+    related_post_ids_iter(candidate).collect()
 }
 
 pub fn related_post_ids_iter(candidate: &PostCandidate) -> impl Iterator<Item = u64> {
-    std::iter::once(candidate.tweet_id)
-        .chain(candidate.retweeted_tweet_id)
-        .chain(candidate.in_reply_to_tweet_id)
+    std::iter::once(candidate.tweet_id).chain(candidate.retweeted_tweet_id)
 }
 
 pub fn vqv_weight(
@@ -62,6 +57,27 @@ pub fn quoted_vqv_weight(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn candidate(tweet_id: u64, retweeted: Option<u64>, in_reply_to: Option<u64>) -> PostCandidate {
+        PostCandidate {
+            tweet_id,
+            retweeted_tweet_id: retweeted,
+            in_reply_to_tweet_id: in_reply_to,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn related_ids_are_the_card_and_retweet_original_only() {
+        let reply = candidate(20, None, Some(10));
+        assert_eq!(get_related_post_ids(&reply), vec![20]);
+
+        let retweet = candidate(30, Some(10), None);
+        assert_eq!(get_related_post_ids(&retweet), vec![30, 10]);
+
+        let original = candidate(10, None, None);
+        assert_eq!(get_related_post_ids(&original), vec![10]);
+    }
 
     #[test]
     fn quoted_vqv_returns_weight_when_check_disabled() {

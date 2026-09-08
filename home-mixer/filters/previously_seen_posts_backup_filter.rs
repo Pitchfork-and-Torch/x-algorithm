@@ -78,6 +78,23 @@ mod tests {
     }
 
     #[test]
+    fn test_keeps_reply_when_only_parent_was_impressed() {
+        let query = ScoredPostsQuery {
+            impressed_post_ids: vec![10],
+            ..Default::default()
+        };
+        let reply = PostCandidate {
+            tweet_id: 20,
+            in_reply_to_tweet_id: Some(10),
+            ..Default::default()
+        };
+        let result = PreviouslySeenPostsBackupFilter.filter(&query, vec![reply, make_candidate(10)]);
+        let kept: Vec<u64> = result.kept.iter().map(|c| c.tweet_id).collect();
+        let removed: Vec<u64> = result.removed.iter().map(|c| c.tweet_id).collect();
+        assert_eq!(kept, vec![20]);
+        assert_eq!(removed, vec![10]);
+    }
+
     fn test_empty_candidates() {
         let query = ScoredPostsQuery {
             impressed_post_ids: vec![1, 2],
