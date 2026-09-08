@@ -23,10 +23,11 @@ use fallback_cache::FallbackCache;
 use gizmoduck_hydrator::GizmoduckAuthorHydrator;
 use safety_label_hydrator::{SafetyLabelHydration, SafetyLabelHydrator};
 use socialgraph_hydrator::SocialgraphHydrator;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tes_hydrator::TesHydrator;
 use viewer_hydrator::ViewerHydrator;
+use xai_core_entities::entities::PureCoreData;
 use xai_core_entities::gizmoduck_client::GizmoduckClient;
 use xai_core_entities::tweet_entity_service_client::TESClient;
 use xai_visibility_filtering_proto as vf_pb;
@@ -203,9 +204,33 @@ impl HydrationPipeline {
             ) = tokio::join!(independent_group, author_hop);
 
             let SafetyLabelHydration {
-                label_types,
-                label_response,
+                mut label_types,
+                mut label_response,
             } = safety_labels;
+
+            let extra_source_ids = extra_source_tweet_ids(&tweet_ids, &core_datas);
+            if !extra_source_ids.is_empty() {
+                let source_labels = self
+                    .safety_label_hydrator
+                    .hydrate(&extra_source_ids, safety_level)
+                    .await;
+                for (id, map) in source_labels.label_types {
+                    label_types.entry(id).or_insert(map);
+                }
+                label_response.extend(source_labels.label_response);
+            }
+
+            let confirmed: HashSet<TweetId> = label_response.keys().copied().collect();
+            let failed_source_lookups = apply_source_tweet_safety_labels(
+                &candidates,
+                &core_datas,
+                &mut label_types,
+                &confirmed,
+            );
+            let candidates: Vec<TweetCandidateInput> = candidates
+                .into_iter()
+                .filter(|c| !failed_source_lookups.contains(&c.tweet_id))
+                .collect();
 
             let tweet_features = self.tes_hydrator.assemble_tweet_features(
                 &candidates,
@@ -236,11 +261,62 @@ impl HydrationPipeline {
     }
 }
 
+fn extra_source_tweet_ids(
+    requested: &[TweetId],
+    core_datas: &HashMap<TweetId, PureCoreData>,
+) -> Vec<TweetId> {
+    let requested: HashSet<TweetId> = requested.iter().copied().collect();
+    let mut extra = Vec::new();
+    let mut seen = HashSet::new();
+    for (id, core) in core_datas {
+        let Some(source) = core.source_tweet_id.map(TweetId) else {
+            continue;
+        };
+        if source == *id || requested.contains(&source) || !seen.insert(source) {
+            continue;
+        }
+        extra.push(source);
+    }
+    extra
+}
+
+fn apply_source_tweet_safety_labels(
+    candidates: &[TweetCandidateInput],
+    core_datas: &HashMap<TweetId, PureCoreData>,
+    label_types: &mut HashMap<TweetId, SafetyLabelMap>,
+    confirmed_ids: &HashSet<TweetId>,
+) -> HashSet<TweetId> {
+    let mut failed = HashSet::new();
+    for candidate in candidates {
+        let Some(source) = core_datas
+            .get(&candidate.tweet_id)
+            .and_then(|core| core.source_tweet_id)
+        else {
+            continue;
+        };
+        let source_id = TweetId(source);
+        if source_id == candidate.tweet_id {
+            continue;
+        }
+        if !confirmed_ids.contains(&source_id) {
+            failed.insert(candidate.tweet_id);
+            continue;
+        }
+        if let Some(source_labels) = label_types.get(&source_id).cloned() {
+            label_types
+                .entry(candidate.tweet_id)
+                .or_default()
+                .union(&source_labels);
+        }
+    }
+    failed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::resolve_candidate;
-    use xai_core_entities::entities::PureCoreData;
+    use crate::models::{resolve_candidate, SafetyLabelType};
+    use std::collections::HashSet;
 
     fn core(tweet_id: u64, author_id: u64) -> HashMap<TweetId, PureCoreData> {
         HashMap::from([(
@@ -330,5 +406,104 @@ mod tests {
             .map(|(author, count)| (author.get(), count))
             .collect();
         assert_eq!(counts, HashMap::from([(10, 2), (20, 1)]));
+    }
+
+    fn core_retweet(wrapper: u64, source: u64, author_id: u64) -> HashMap<TweetId, PureCoreData> {
+        HashMap::from([(
+            TweetId(wrapper),
+            PureCoreData {
+                author_id,
+                source_tweet_id: Some(source),
+                ..Default::default()
+            },
+        )])
+    }
+
+    fn civic_labels() -> SafetyLabelMap {
+        SafetyLabelMap::new(HashSet::from([SafetyLabelType::FOSNR_CIVIC_INTEGRITY]))
+    }
+
+    #[test]
+    fn extra_source_ids_skip_already_requested_and_self() {
+        let requested = vec![TweetId(1), TweetId(99)];
+        let mut cores = core_retweet(1, 99, 10);
+        cores.insert(
+            TweetId(2),
+            PureCoreData {
+                author_id: 20,
+                source_tweet_id: Some(50),
+                ..Default::default()
+            },
+        );
+        cores.insert(
+            TweetId(3),
+            PureCoreData {
+                author_id: 30,
+                source_tweet_id: Some(3),
+                ..Default::default()
+            },
+        );
+
+        let extra = extra_source_tweet_ids(&requested, &cores);
+        assert_eq!(extra, vec![TweetId(50)]);
+    }
+
+    #[test]
+    fn retweet_inherits_confirmed_civic_label_from_original() {
+        let cores = core_retweet(1, 99, 10);
+        let candidates = vec![resolve_candidate(&raw(1, Some(10)), &cores).unwrap()];
+        let mut labels = HashMap::from([
+            (TweetId(1), SafetyLabelMap::default()),
+            (TweetId(99), civic_labels()),
+        ]);
+        let confirmed = HashSet::from([TweetId(1), TweetId(99)]);
+
+        let failed = apply_source_tweet_safety_labels(&candidates, &cores, &mut labels, &confirmed);
+
+        assert!(failed.is_empty());
+        assert!(labels[&TweetId(1)].has_label(SafetyLabelType::FOSNR_CIVIC_INTEGRITY));
+        assert!(labels[&TweetId(99)].has_label(SafetyLabelType::FOSNR_CIVIC_INTEGRITY));
+    }
+
+    #[test]
+    fn retweet_source_label_err_fails_closed() {
+        let cores = core_retweet(1, 99, 10);
+        let candidates = vec![resolve_candidate(&raw(1, Some(10)), &cores).unwrap()];
+        let mut labels = HashMap::from([(TweetId(1), SafetyLabelMap::default())]);
+        let confirmed = HashSet::from([TweetId(1)]);
+
+        let failed = apply_source_tweet_safety_labels(&candidates, &cores, &mut labels, &confirmed);
+
+        assert_eq!(failed, HashSet::from([TweetId(1)]));
+        assert!(!labels[&TweetId(1)].has_label(SafetyLabelType::FOSNR_CIVIC_INTEGRITY));
+    }
+
+    #[test]
+    fn native_tweet_is_unchanged_when_applying_source_labels() {
+        let cores = core(1, 10);
+        let candidates = vec![resolve_candidate(&raw(1, Some(10)), &cores).unwrap()];
+        let mut labels = HashMap::from([(TweetId(1), SafetyLabelMap::default())]);
+        let confirmed = HashSet::from([TweetId(1)]);
+
+        let failed = apply_source_tweet_safety_labels(&candidates, &cores, &mut labels, &confirmed);
+
+        assert!(failed.is_empty());
+        assert!(!labels[&TweetId(1)].has_label(SafetyLabelType::FOSNR_CIVIC_INTEGRITY));
+    }
+
+    #[test]
+    fn confirmed_unlabeled_original_does_not_fail_closed() {
+        let cores = core_retweet(1, 99, 10);
+        let candidates = vec![resolve_candidate(&raw(1, Some(10)), &cores).unwrap()];
+        let mut labels = HashMap::from([
+            (TweetId(1), SafetyLabelMap::default()),
+            (TweetId(99), SafetyLabelMap::default()),
+        ]);
+        let confirmed = HashSet::from([TweetId(1), TweetId(99)]);
+
+        let failed = apply_source_tweet_safety_labels(&candidates, &cores, &mut labels, &confirmed);
+
+        assert!(failed.is_empty());
+        assert!(!labels[&TweetId(1)].has_label(SafetyLabelType::FOSNR_CIVIC_INTEGRITY));
     }
 }
