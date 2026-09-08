@@ -145,9 +145,11 @@ def generatedAtMillis(daysIncluded: Option[UthDaysIncluded], fallbackMs: Long): 
 def formatGeneratedAtIso(ms: Long): String =
   utcIsoSeconds.format(Time.fromMilliseconds(ms))
 
+// carried = ever labeled in the window; removed = later cleared. Report net.
 def sumCarried(days: Option[Seq[UthDayCarriedRemoved]]): Long =
   days.getOrElse(Seq.empty).foldLeft(0L) { (acc, d) =>
-    acc + d.carried.getOrElse(0L)
+    val stillLabeled = d.carried.getOrElse(0L) - d.removed.getOrElse(0L)
+    acc + (if (stillLabeled > 0L) stillLabeled else 0L)
   }
 
 def sumDayCounts(days: Option[Seq[UthDayCount]]): Long =
