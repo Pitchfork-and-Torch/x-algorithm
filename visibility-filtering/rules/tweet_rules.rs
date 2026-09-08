@@ -838,7 +838,7 @@ mod tests {
         ]);
         assert_drops(legal, &viewer_with_country("de"), &legal_c, &reason);
         assert_allows(legal, &viewer_with_country("us"), &legal_c);
-        assert_allows(legal, &viewer(VIEWER_ID), &legal_c);
+        assert_drops(legal, &viewer(VIEWER_ID), &legal_c, &reason);
 
         let bystander = takedown_candidate(vec![TakedownReason::BystanderReport {
             country_code: "de".to_string(),
@@ -895,11 +895,46 @@ mod tests {
         let country_scoped = takedown_candidate(vec![TakedownReason::LegalRequest {
             country_code: "de".to_string(),
         }]);
-        assert_allows(legal, &viewer(VIEWER_ID), &country_scoped);
+        assert_drops(legal, &viewer(VIEWER_ID), &country_scoped, &reason);
         let bystander_scoped = takedown_candidate(vec![TakedownReason::BystanderReport {
             country_code: "de".to_string(),
         }]);
-        assert_allows(local, &viewer(VIEWER_ID), &bystander_scoped);
+        assert_drops(local, &viewer(VIEWER_ID), &bystander_scoped, &reason);
+
+        let empty_country = takedown_candidate(vec![TakedownReason::LegalRequest {
+            country_code: String::new(),
+        }]);
+        assert_drops(legal, &viewer_with_country("us"), &empty_country, &reason);
+        assert_drops(legal, &viewer(VIEWER_ID), &empty_country, &reason);
+
+        let withheld_in_countries = candidate()
+            .with_tweet_features(TweetFeatures {
+                takedown_country_codes: vec!["de".to_string()],
+                ..Default::default()
+            })
+            .build();
+        assert_drops(
+            legal,
+            &viewer_with_country("de"),
+            &withheld_in_countries,
+            &reason,
+        );
+        assert_allows(legal, &viewer_with_country("us"), &withheld_in_countries);
+        assert_drops(legal, &viewer(VIEWER_ID), &withheld_in_countries, &reason);
+        assert_allows(local, &viewer_with_country("de"), &withheld_in_countries);
+
+        let withheld_err_worldwide = candidate()
+            .with_tweet_features(TweetFeatures {
+                takedown_country_codes: vec!["xx".to_string()],
+                ..Default::default()
+            })
+            .build();
+        assert_drops(
+            legal,
+            &viewer_with_country("us"),
+            &withheld_err_worldwide,
+            &reason,
+        );
 
         let dmca = takedown_candidate(vec![TakedownReason::Dmca]);
         assert_drops(legal, &viewer_with_country("de"), &dmca, &reason);

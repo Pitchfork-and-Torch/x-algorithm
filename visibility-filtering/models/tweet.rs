@@ -27,6 +27,7 @@ pub struct TweetFeatures {
     pub core: CoreFeature,
     pub media: MediaFeature,
     pub takedown_reasons: Vec<xai_core_entities::entities::TakedownReason>,
+    pub takedown_country_codes: Vec<String>,
     pub nsfw: NsfwFeature,
     pub is_nullcast: bool,
     pub is_community_tweet: bool,

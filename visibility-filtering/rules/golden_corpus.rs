@@ -155,6 +155,15 @@ fn takedown_candidate(reason: TakedownReason) -> HydratedTweetCandidate {
         .build()
 }
 
+fn withheld_in_countries_candidate(codes: &[&str]) -> HydratedTweetCandidate {
+    candidate()
+        .with_tweet_features(TweetFeatures {
+            takedown_country_codes: codes.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        })
+        .build()
+}
+
 fn exclusive_candidate(viewer_super_follows_author: bool) -> HydratedTweetCandidate {
     let mut c = candidate().build();
     c.exclusive_content = Some(ExclusiveContentFeatures {
@@ -620,6 +629,50 @@ fn tweet_shape_cases() -> Vec<Case> {
             candidate: takedown_candidate(TakedownReason::Dmca),
             expected_action: Allow,
             expected_decided_by: None,
+        },
+        Case {
+            name: "legal_takedown_country_scoped_drops_without_viewer_country",
+            level: TimelineHome,
+            viewer: viewer(VIEWER_ID),
+            candidate: takedown_candidate(TakedownReason::LegalRequest {
+                country_code: "de".to_string(),
+            }),
+            expected_action: Drop(FilteredReason::UnspecifiedReason),
+            expected_decided_by: Some("DropLegalTakendownPostRule"),
+        },
+        Case {
+            name: "legal_takedown_empty_country_is_worldwide",
+            level: TimelineHome,
+            viewer: viewer_in_country("us"),
+            candidate: takedown_candidate(TakedownReason::LegalRequest {
+                country_code: String::new(),
+            }),
+            expected_action: Drop(FilteredReason::UnspecifiedReason),
+            expected_decided_by: Some("DropLegalTakendownPostRule"),
+        },
+        Case {
+            name: "withheld_in_countries_drops_matching_viewer",
+            level: TimelineHome,
+            viewer: viewer_in_country("de"),
+            candidate: withheld_in_countries_candidate(&["de", "fr"]),
+            expected_action: Drop(FilteredReason::UnspecifiedReason),
+            expected_decided_by: Some("DropLegalTakendownPostRule"),
+        },
+        Case {
+            name: "withheld_in_countries_allows_other_country",
+            level: TimelineHome,
+            viewer: viewer_in_country("us"),
+            candidate: withheld_in_countries_candidate(&["de", "fr"]),
+            expected_action: Allow,
+            expected_decided_by: None,
+        },
+        Case {
+            name: "withheld_in_countries_err_worldwide_drops_oon",
+            level: TimelineHomeRecommendations,
+            viewer: viewer_in_country("us"),
+            candidate: withheld_in_countries_candidate(&["xx"]),
+            expected_action: Drop(FilteredReason::UnspecifiedReason),
+            expected_decided_by: Some("DropLegalTakendownPostRule"),
         },
     ]
 }
