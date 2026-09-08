@@ -17,7 +17,7 @@ use crate::models::{
 };
 use crate::rules::SafetyLevel;
 use crate::safety_label_source::SafetyLabelSource;
-use batch::TweetHydrationBatch;
+use batch::{Hydrated, TweetHydrationBatch};
 use exclusive_content_hydrator::ExclusiveContentHydrator;
 use fallback_cache::FallbackCache;
 use gizmoduck_hydrator::GizmoduckAuthorHydrator;
@@ -60,6 +60,26 @@ struct CandidateFeatures {
     safety_labels: HashMap<TweetId, SafetyLabelMap>,
     relationships: TweetHydrationBatch<ViewerAuthorRelationship>,
     exclusive_content: HashMap<TweetId, Option<ExclusiveContentFeatures>>,
+}
+
+/// Drop candidates whose socialgraph relationship read Failed.
+/// `assemble` uses `get_or_default`, which turns Failed into "not muted /
+/// not blocked". FilterTweets already maps a missing hydrated candidate to
+/// `Verdict::unresolved_author` (Drop). Genuine Found (including all-false)
+/// is kept. Logged-out viewers are Found(default), not Failed.
+pub(crate) fn retain_candidates_with_usable_relationships(
+    candidates: Vec<TweetCandidateInput>,
+    relationships: &TweetHydrationBatch<ViewerAuthorRelationship>,
+) -> Vec<TweetCandidateInput> {
+    candidates
+        .into_iter()
+        .filter(|c| {
+            !matches!(
+                relationships.hydrated(&c.tweet_id),
+                Some(Hydrated::Failed(_))
+            )
+        })
+        .collect()
 }
 
 impl CandidateFeatures {
@@ -207,6 +227,8 @@ impl HydrationPipeline {
                 label_response,
             } = safety_labels;
 
+            let candidates =
+                retain_candidates_with_usable_relationships(candidates, &relationships);
             let tweet_features = self.tes_hydrator.assemble_tweet_features(
                 &candidates,
                 &core_datas,
@@ -330,5 +352,95 @@ mod tests {
             .map(|(author, count)| (author.get(), count))
             .collect();
         assert_eq!(counts, HashMap::from([(10, 2), (20, 1)]));
+    }
+
+    fn tweet(tweet_id: u64, author_id: u64) -> TweetCandidateInput {
+        resolve_candidate(&raw(tweet_id, Some(author_id)), &HashMap::new()).unwrap()
+    }
+
+    #[test]
+    fn retain_drops_failed_relationship_and_keeps_found() {
+        let relationships = TweetHydrationBatch::from_results(
+            [TweetId(1), TweetId(2)],
+            HashMap::from([
+                (
+                    TweetId(1),
+                    Err::<Option<ViewerAuthorRelationship>, _>("socialgraph unavailable"),
+                ),
+                (TweetId(2), Ok(Some(ViewerAuthorRelationship::default()))),
+            ]),
+        );
+
+        let kept = retain_candidates_with_usable_relationships(
+            vec![tweet(1, 10), tweet(2, 20)],
+            &relationships,
+        );
+
+        assert_eq!(
+            kept.iter().map(|c| c.tweet_id.0).collect::<Vec<_>>(),
+            vec![2]
+        );
+    }
+
+    #[test]
+    fn retain_keeps_found_mute_and_block() {
+        let relationships = TweetHydrationBatch::from_results(
+            [TweetId(1)],
+            HashMap::from([(
+                TweetId(1),
+                Ok::<_, anyhow::Error>(Some(ViewerAuthorRelationship {
+                    viewer_mutes_author: true,
+                    viewer_blocks_author: true,
+                    ..Default::default()
+                })),
+            )]),
+        );
+
+        let kept = retain_candidates_with_usable_relationships(vec![tweet(1, 10)], &relationships);
+
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].tweet_id.0, 1);
+    }
+
+    #[test]
+    fn retain_drops_missing_relationship_key() {
+        let relationships = TweetHydrationBatch::from_values(
+            [TweetId(1)],
+            HashMap::from([(TweetId(1), ViewerAuthorRelationship::default())]),
+        );
+
+        let kept = retain_candidates_with_usable_relationships(
+            vec![tweet(1, 10), tweet(2, 20)],
+            &relationships,
+        );
+
+        assert_eq!(
+            kept.iter().map(|c| c.tweet_id.0).collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn assemble_still_defaults_failed_relationship_if_not_retained() {
+        let resolved = tweet(1, 10);
+        let results = CandidateFeatures {
+            tweet_features: HashMap::new(),
+            author_features: TweetHydrationBatch::empty(),
+            safety_labels: HashMap::new(),
+            relationships: TweetHydrationBatch::from_results(
+                [TweetId(1)],
+                HashMap::from([(
+                    TweetId(1),
+                    Err::<Option<ViewerAuthorRelationship>, _>("socialgraph unavailable"),
+                )]),
+            ),
+            exclusive_content: HashMap::new(),
+        };
+
+        let assembled = results.assemble(&[resolved]);
+
+        assert_eq!(assembled.len(), 1);
+        assert!(!assembled[0].relationship.viewer_mutes_author);
+        assert!(!assembled[0].relationship.viewer_blocks_author);
     }
 }
