@@ -666,6 +666,14 @@ fn age_gating_cases() -> Vec<Case> {
             expected_action: Allow,
             expected_decided_by: None,
         },
+        Case {
+            name: "gizmoduck_age_lookup_failed_drops_sensitive_media",
+            level: TimelineHome,
+            viewer: viewer_with_age(ViewerAge::LookupFailed),
+            candidate: labeled_media(SafetyLabelType::NSFW_HIGH_RECALL),
+            expected_action: Drop(FilteredReason::ContainNsfwMedia),
+            expected_decided_by: Some("SensitiveViewerUnderageDropRule"),
+        },
     ]
 }
 

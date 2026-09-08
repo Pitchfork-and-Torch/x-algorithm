@@ -70,6 +70,11 @@ impl ViewerPredicates<'_> {
     }
 
     #[inline]
+    pub fn age_lookup_failed(&self) -> bool {
+        self.ctx.viewer.viewer_age_lookup_failed()
+    }
+
+    #[inline]
     pub fn allows_sensitive_media(&self) -> bool {
         self.ctx.viewer.allows_sensitive_media
     }
