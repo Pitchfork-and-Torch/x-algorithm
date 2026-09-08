@@ -192,6 +192,13 @@ fn nsfw_high_precision_reason() -> FilteredReason {
     })
 }
 
+fn civic_integrity_reason() -> FilteredReason {
+    FilteredReason::SafetyResult(SafetyResult {
+        reason: Some(SafetyResultReason::FosnrCivicIntegrity),
+        action: Action::Drop(DropReason {}),
+    })
+}
+
 fn filter_all_cases() -> Vec<Case> {
     vec![
         Case {
@@ -504,7 +511,7 @@ fn tweet_label_cases() -> Vec<Case> {
             level: TimelineHome,
             viewer: viewer(VIEWER_ID),
             candidate: labeled(SafetyLabelType::FOSNR_CIVIC_INTEGRITY),
-            expected_action: Drop(FilteredReason::PossiblyUndesirable),
+            expected_action: Drop(civic_integrity_reason()),
             expected_decided_by: Some("FosnrCivicIntegrityDropRule"),
         },
     ]
@@ -894,6 +901,14 @@ fn oon_tweet_label_cases() -> Vec<Case> {
             candidate: labeled(SafetyLabelType::DO_NOT_AMPLIFY),
             expected_action: Drop(FilteredReason::PossiblyUndesirable),
             expected_decided_by: Some("DoNotAmplifyOonDropRule"),
+        },
+        Case {
+            name: "fosnr_civic_integrity_label_drops_oon",
+            level: TimelineHomeRecommendations,
+            viewer: viewer(VIEWER_ID),
+            candidate: labeled(SafetyLabelType::FOSNR_CIVIC_INTEGRITY),
+            expected_action: Drop(civic_integrity_reason()),
+            expected_decided_by: Some("FosnrCivicIntegrityDropRule"),
         },
         Case {
             name: "malicious_url_label_drops_oon",
