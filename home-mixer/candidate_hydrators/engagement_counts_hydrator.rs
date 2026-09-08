@@ -131,16 +131,30 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for EngagementCountsHydrato
         unique_ids.sort_unstable();
         unique_ids.dedup();
 
+        // Store errors must not become Ok(empty). CachedHydrator caches Ok, and
+        // as_tweet_info unwrap_or(0) would stamp Phoenix / Thompson as zero
+        // engagement for 60s. LanguageCode / MediaInfo already return Err here.
         let counts = if unique_ids.is_empty() {
-            HashMap::new()
+            Ok(HashMap::new())
         } else {
-            self.client
-                .get_engagement_counts(&unique_ids)
-                .await
-                .unwrap_or_else(|e| {
-                    warn!(error = %e, "engagement_counts_hydration dragonfly_error");
-                    HashMap::new()
-                })
+            self.client.get_engagement_counts(&unique_ids).await
+        };
+
+        let counts = match counts {
+            Ok(counts) => counts,
+            Err(e) => {
+                warn!(error = %e, "engagement_counts_hydration dragonfly_error");
+                return candidates
+                    .iter()
+                    .map(|c| {
+                        if !fetch_counts(c) {
+                            Ok(preserve_counts(c))
+                        } else {
+                            Err(format!("engagement_counts dragonfly_error: {e}"))
+                        }
+                    })
+                    .collect();
+            }
         };
 
         candidates
@@ -326,5 +340,118 @@ mod tests {
         assert_eq!(first[0].as_ref().unwrap().view_count, Some(5));
         assert_eq!(second[0].as_ref().unwrap().view_count, Some(5));
         assert_eq!(client.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[derive(Default)]
+    struct FailingClient {
+        calls: AtomicUsize,
+    }
+
+    #[tonic::async_trait]
+    impl EngagementCountsClient for FailingClient {
+        async fn get_engagement_counts(
+            &self,
+            _tweet_ids: &[u64],
+        ) -> Result<HashMap<u64, EngagementCounts>, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err("dragonfly down".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn store_error_returns_err_instead_of_zero_counts() {
+        let h = EngagementCountsHydrator::new(Arc::new(FailingClient::default())).await;
+        let candidates = vec![PostCandidate {
+            tweet_id: 10,
+            author_id: 1,
+            fav_count: Some(99),
+            view_count: Some(50),
+            view_count_on_home: Some(40),
+            ..Default::default()
+        }];
+        let q = query(false, &[(COUNTS, "true")]);
+        let result = h.hydrate_from_client(&q, &candidates).await;
+        assert!(
+            result[0]
+                .as_ref()
+                .err()
+                .is_some_and(|e| e.contains("dragonfly_error")),
+            "store error must not become Ok(zero counts), got {:?}",
+            result[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn store_error_does_not_overwrite_or_cache_zeros() {
+        let client = Arc::new(FailingClient::default());
+        let h = EngagementCountsHydrator::new(client.clone()).await;
+        let candidates = vec![PostCandidate {
+            tweet_id: 10,
+            author_id: 1,
+            fav_count: Some(99),
+            view_count: Some(50),
+            view_count_on_home: Some(40),
+            ..Default::default()
+        }];
+        let q = query(false, &[(COUNTS, "true")]);
+
+        let first = xai_candidate_pipeline::hydrator::Hydrator::hydrate(&h, &q, &candidates).await;
+        let second = xai_candidate_pipeline::hydrator::Hydrator::hydrate(&h, &q, &candidates).await;
+        assert!(first[0].is_err());
+        assert!(second[0].is_err());
+        assert_eq!(
+            client.calls.load(Ordering::SeqCst),
+            2,
+            "Err must not be cached as empty counts"
+        );
+
+        let mut live = candidates;
+        xai_candidate_pipeline::hydrator::Hydrator::update_all(&h, &mut live, first);
+        assert_eq!(live[0].fav_count, Some(99));
+        assert_eq!(live[0].view_count, Some(50));
+        assert_eq!(live[0].view_count_on_home, Some(40));
+    }
+
+    #[tokio::test]
+    async fn store_error_preserves_cached_ineligible_and_errs_eligible() {
+        let h = EngagementCountsHydrator::new(Arc::new(FailingClient::default())).await;
+        let candidates = vec![
+            PostCandidate {
+                tweet_id: 10,
+                author_id: 1,
+                author_followers_count: Some(100),
+                view_count: Some(5),
+                ..Default::default()
+            },
+            PostCandidate {
+                tweet_id: 20,
+                author_id: 2,
+                author_followers_count: Some(5000),
+                view_count: Some(999),
+                ..Default::default()
+            },
+        ];
+        let q = query(
+            true,
+            &[(COLD_START, "true"), (COUNTS, "true"), (CAP, "1000")],
+        );
+        let result = h.hydrate_from_client(&q, &candidates).await;
+        assert!(result[0].is_err());
+        assert_eq!(result[1].as_ref().unwrap().view_count, Some(999));
+    }
+
+    #[tokio::test]
+    async fn successful_miss_still_hydrates_empty_counts() {
+        let h = hydrator(HashMap::new()).await;
+        let candidates = vec![PostCandidate {
+            tweet_id: 10,
+            author_id: 1,
+            fav_count: Some(99),
+            ..Default::default()
+        }];
+        let q = query(false, &[(COUNTS, "true")]);
+        let result = h.hydrate_from_client(&q, &candidates).await;
+        assert_eq!(result[0].as_ref().unwrap().fav_count, None);
+        assert_eq!(result[0].as_ref().unwrap().view_count, None);
     }
 }
