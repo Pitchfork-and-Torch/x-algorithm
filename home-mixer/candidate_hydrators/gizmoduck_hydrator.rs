@@ -28,8 +28,12 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
     type CacheKey = GizmoduckCacheKey;
     type CacheValue = GizmoduckCacheValue;
 
-    fn enable(&self, query: &ScoredPostsQuery) -> bool {
-        !query.has_cached_posts
+    fn enable(&self, _query: &ScoredPostsQuery) -> bool {
+        // Redis slate cache stores nsfw_author / nsfw_author_ads /
+        // nsfw_author_phoenix from the request that populated it. Skipping
+        // here keeps those bits for up to 180s, so a newly labeled author
+        // still passes OONNsfwSimclustersFilter.
+        true
     }
 
     fn cache_store(&self) -> &dyn CacheStore<Self::CacheKey, Self::CacheValue> {
@@ -190,4 +194,31 @@ pub struct GizmoduckCacheValue {
     pub nsfw_author: Option<bool>,
     pub nsfw_author_ads: Option<bool>,
     pub nsfw_author_phoenix: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clients::gizmoduck_client::MockGizmoduckClient;
+
+    fn hydrator() -> GizmoduckCandidateHydrator {
+        GizmoduckCandidateHydrator {
+            gizmoduck_client: Arc::new(MockGizmoduckClient::default()),
+            cache: default_quick_cache(),
+        }
+    }
+
+    fn query(has_cached_posts: bool) -> ScoredPostsQuery {
+        ScoredPostsQuery {
+            has_cached_posts,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn enable_on_cache_hit_and_miss() {
+        let hydrator = hydrator();
+        assert!(hydrator.enable(&query(true)));
+        assert!(hydrator.enable(&query(false)));
+    }
 }
