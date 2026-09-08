@@ -154,6 +154,17 @@ impl PostStore {
         Ok(())
     }
 
+    fn deque_contains(
+        posts_by_user: &DashMap<i64, VecDeque<TinyPost>>,
+        author_id: i64,
+        post_id: i64,
+    ) -> bool {
+        posts_by_user
+            .get(&author_id)
+            .map(|entry| entry.iter().any(|p| p.post_id == post_id))
+            .unwrap_or(false)
+    }
+
     fn insert_posts_internal(&self, posts: Vec<LightPost>) {
         for post in posts {
             let post_id = post.post_id;
@@ -162,13 +173,17 @@ impl PostStore {
             let is_original = !post.is_reply && !post.is_retweet;
 
             if self.deleted_posts.contains_key(&post_id) {
-                continue;
+                self.deleted_posts.remove(&post_id);
             }
+
+            let already_indexed = Self::deque_contains(&self.original_posts_by_user, author_id, post_id)
+                || Self::deque_contains(&self.secondary_posts_by_user, author_id, post_id)
+                || Self::deque_contains(&self.video_posts_by_user, author_id, post_id);
 
             let old = self
                 .posts
                 .insert(post_id, Arc::new(CompactPost::from(post)));
-            if old.is_some() {
+            if old.is_some() || already_indexed {
                 continue;
             }
 
@@ -876,5 +891,50 @@ mod tests {
         assert!(!post_ids.contains(&1_003)); 
         assert!(!post_ids.contains(&1_005)); 
         assert!(!post_ids.contains(&1_006)); 
+    }
+
+    #[test]
+    fn undelete_clears_tombstone_and_restores_post() {
+        let store = PostStore::new(2 * 24 * 60 * 60, 0);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let post = LightPost {
+            post_id: 42,
+            author_id: 100,
+            created_at: current_time - 1,
+            in_reply_to_post_id: None,
+            in_reply_to_user_id: None,
+            is_retweet: false,
+            is_reply: false,
+            source_post_id: None,
+            source_user_id: None,
+            has_video: false,
+            conversation_id: None,
+        };
+        store.insert_posts(vec![post.clone()]);
+        assert_eq!(
+            store
+                .get_all_posts_by_users(&[100], &HashSet::new(), Instant::now(), 1)
+                .len(),
+            1
+        );
+
+        store.mark_as_deleted(vec![TweetDeleteEvent {
+            post_id: 42,
+            deleted_at: current_time,
+        }]);
+        assert!(store
+            .get_all_posts_by_users(&[100], &HashSet::new(), Instant::now(), 1)
+            .is_empty());
+        assert!(store.deleted_posts.contains_key(&42));
+
+        store.insert_posts(vec![post]);
+        let restored = store.get_all_posts_by_users(&[100], &HashSet::new(), Instant::now(), 1);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].post_id, 42);
+        assert!(!store.deleted_posts.contains_key(&42));
     }
 }
