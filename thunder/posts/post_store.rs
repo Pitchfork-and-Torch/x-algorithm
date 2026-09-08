@@ -220,11 +220,27 @@ impl PostStore {
                 user_posts_entry.push_back(tiny_post);
             }
 
-            for post_id in posts_to_remove {
-                self.posts.remove(&post_id);
+            // A post can live in more than one index (original+video, or
+            // retweet+video). Capacity eviction from one list must not drop
+            // the CompactPost while another list still points at it — otherwise
+            // get_* silently filter_maps the still-indexed id away.
+            for evicted_id in posts_to_remove {
+                if !self.author_still_indexes(author_id, evicted_id) {
+                    self.posts.remove(&evicted_id);
+                }
             }
         }
 
+    }
+
+    fn author_still_indexes(&self, author_id: i64, post_id: i64) -> bool {
+        let in_deque = |map: &DashMap<i64, VecDeque<TinyPost>>| {
+            map.get(&author_id)
+                .is_some_and(|posts| posts.iter().any(|p| p.post_id == post_id))
+        };
+        in_deque(&self.original_posts_by_user)
+            || in_deque(&self.secondary_posts_by_user)
+            || in_deque(&self.video_posts_by_user)
     }
 
         pub fn get_videos_by_users(
@@ -876,5 +892,114 @@ mod tests {
         assert!(!post_ids.contains(&1_003)); 
         assert!(!post_ids.contains(&1_005)); 
         assert!(!post_ids.contains(&1_006)); 
+    }
+
+    fn light_post(
+        post_id: i64,
+        author_id: i64,
+        created_at: i64,
+        is_retweet: bool,
+        has_video: bool,
+    ) -> LightPost {
+        LightPost {
+            post_id,
+            author_id,
+            created_at,
+            in_reply_to_post_id: None,
+            in_reply_to_user_id: None,
+            is_retweet,
+            is_reply: false,
+            source_post_id: if is_retweet { Some(9_000) } else { None },
+            source_user_id: if is_retweet { Some(9) } else { None },
+            has_video,
+            conversation_id: None,
+        }
+    }
+
+    #[test]
+    fn video_list_overflow_does_not_unserve_still_indexed_original() {
+        let store = PostStore::new(2 * 24 * 60 * 60, 0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // One original video, then fill the video index with retweets.
+        // The next video retweet evicts the original from video_posts_by_user
+        // only. The original index still holds it.
+        let original_id = 1_i64;
+        store.insert_posts(vec![light_post(
+            original_id,
+            100,
+            now - (MAX_POSTING_LIST_SIZE as i64) - 2,
+            false,
+            true,
+        )]);
+        let mut retweets = Vec::with_capacity(MAX_POSTING_LIST_SIZE);
+        for i in 0..MAX_POSTING_LIST_SIZE - 1 {
+            retweets.push(light_post(
+                10_000 + i as i64,
+                100,
+                now - (MAX_POSTING_LIST_SIZE as i64) + i as i64,
+                true,
+                true,
+            ));
+        }
+        store.insert_posts(retweets);
+        store.insert_posts(vec![light_post(99_999, 100, now - 1, true, true)]);
+
+        assert!(
+            store
+                .original_posts_by_user
+                .get(&100)
+                .is_some_and(|d| d.iter().any(|p| p.post_id == original_id)),
+            "original must remain on the original index"
+        );
+        assert!(
+            store.posts.contains_key(&original_id),
+            "sibling-index overflow must not drop the CompactPost"
+        );
+
+        let served = store.get_all_posts_by_users(&[100], &HashSet::new(), Instant::now(), 1);
+        assert!(
+            served.iter().any(|p| p.post_id == original_id),
+            "in-network originals must still serve after video-list overflow"
+        );
+        let videos = store.get_videos_by_users(&[100], &HashSet::new(), Instant::now(), 1);
+        assert!(
+            !videos.iter().any(|p| p.post_id == original_id),
+            "the original was evicted from the video index and should not be a video result"
+        );
+    }
+
+    #[test]
+    fn single_index_overflow_still_drops_unindexed_post() {
+        let store = PostStore::new(2 * 24 * 60 * 60, 0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let mut posts = Vec::with_capacity(MAX_POSTING_LIST_SIZE + 1);
+        for i in 0..=MAX_POSTING_LIST_SIZE {
+            posts.push(light_post(
+                (i + 1) as i64,
+                7,
+                now - (MAX_POSTING_LIST_SIZE as i64) - 2 + i as i64,
+                false,
+                false,
+            ));
+        }
+        store.insert_posts(posts);
+
+        assert!(
+            !store.posts.contains_key(&1),
+            "an original evicted from its only index must leave posts"
+        );
+        let served = store.get_all_posts_by_users(&[7], &HashSet::new(), Instant::now(), 1);
+        assert!(!served.iter().any(|p| p.post_id == 1));
+        assert!(served
+            .iter()
+            .any(|p| p.post_id == (MAX_POSTING_LIST_SIZE as i64 + 1)));
     }
 }
