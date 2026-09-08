@@ -535,4 +535,73 @@ mod tests {
             Some(BrandSafetyVerdict::Safe)
         );
     }
+
+    #[tokio::test]
+    async fn community_note_keeps_safe_verdict() {
+        let mut labels: SafetyLabelMap = HashMap::new();
+        labels.insert(SafetyLabelType::GROK_SFA, SafetyLabel::default());
+        labels.insert(SafetyLabelType::NSFA_COMMUNITY_NOTE, SafetyLabel::default());
+        let client = Arc::new(FakeVfClient {
+            batch: SafetyLabelsBatch {
+                labels: HashMap::from([(1, labels)]),
+                failures: HashMap::new(),
+            },
+        });
+        let hydrator = AdsBrandSafetyVfHydrator { client };
+        let candidates = vec![PostCandidate {
+            tweet_id: 1,
+            ..Default::default()
+        }];
+
+        let results = hydrator
+            .hydrate(&ScoredPostsQuery::default(), &candidates)
+            .await;
+
+        let hydrated = results[0].as_ref().unwrap();
+        assert_eq!(
+            hydrated.brand_safety_verdict,
+            Some(BrandSafetyVerdict::Safe)
+        );
+        assert!(hydrated
+            .safety_labels
+            .iter()
+            .any(|l| l.label_type == SafetyLabelType::NSFA_COMMUNITY_NOTE));
+    }
+
+    #[tokio::test]
+    async fn community_note_on_quoted_or_ancestor_does_not_escalate() {
+        let mut safe_labels: SafetyLabelMap = HashMap::new();
+        safe_labels.insert(SafetyLabelType::GROK_SFA, SafetyLabel::default());
+        let mut noted_labels: SafetyLabelMap = HashMap::new();
+        noted_labels.insert(SafetyLabelType::GROK_SFA, SafetyLabel::default());
+        noted_labels.insert(SafetyLabelType::NSFA_COMMUNITY_NOTE, SafetyLabel::default());
+        let client = Arc::new(FakeVfClient {
+            batch: SafetyLabelsBatch {
+                labels: HashMap::from([
+                    (1, safe_labels),
+                    (2, noted_labels.clone()),
+                    (10, noted_labels),
+                ]),
+                failures: HashMap::new(),
+            },
+        });
+        let hydrator = AdsBrandSafetyVfHydrator { client };
+        let candidates = vec![PostCandidate {
+            tweet_id: 1,
+            quoted_tweet_id: Some(2),
+            ancestors: vec![10],
+            ..Default::default()
+        }];
+
+        let results = hydrator
+            .hydrate(&ScoredPostsQuery::default(), &candidates)
+            .await;
+
+        let hydrated = results[0].as_ref().unwrap();
+        assert_eq!(
+            hydrated.brand_safety_verdict,
+            Some(BrandSafetyVerdict::Safe),
+            "a note on the quote or parent must not bury the reply"
+        );
+    }
 }
