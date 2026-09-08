@@ -243,9 +243,10 @@ impl CandidateHelpers for PostCandidate {
             quoted_author_id: self.quoted_user_id.unwrap_or(0),
             in_reply_to_tweet_id: self.in_reply_to_tweet_id.unwrap_or(0),
             is_author_followed_by_user: is_followed_by_viewer,
-            safety_label_mask: if self.retweeted_user_id.is_none()
-                && self.nsfw_author_phoenix.unwrap_or(false)
-            {
+            // Phoenix hashes get_original_author_id(). authorIsNsfwSeq must
+            // describe that account on retweets too. The old
+            // retweeted_user_id.is_none() guard zeroed the bit on every RT.
+            safety_label_mask: if self.nsfw_author_phoenix.unwrap_or(false) {
                 SAFETY_BIT_AUTHOR_NSFW
             } else {
                 0
@@ -353,5 +354,54 @@ mod tests {
             deserialized.safety_labels[0].label_type,
             SafetyLabelType::BOUNCE
         );
+    }
+
+    #[test]
+    fn as_tweet_info_stamps_author_nsfw_on_originals() {
+        let nsfw = PostCandidate {
+            tweet_id: 11,
+            author_id: 21,
+            nsfw_author_phoenix: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            nsfw.as_tweet_info(false).safety_label_mask,
+            SAFETY_BIT_AUTHOR_NSFW
+        );
+
+        let clean = PostCandidate {
+            tweet_id: 11,
+            author_id: 21,
+            nsfw_author_phoenix: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(clean.as_tweet_info(false).safety_label_mask, 0);
+    }
+
+    #[test]
+    fn as_tweet_info_stamps_author_nsfw_on_retweets() {
+        let rt = PostCandidate {
+            tweet_id: 11,
+            author_id: 21,
+            retweeted_tweet_id: Some(12),
+            retweeted_user_id: Some(22),
+            nsfw_author_phoenix: Some(true),
+            ..Default::default()
+        };
+        let info = rt.as_tweet_info(true);
+        assert_eq!(info.author_id, 22);
+        assert_eq!(info.safety_label_mask, SAFETY_BIT_AUTHOR_NSFW);
+
+        let clean_origin = PostCandidate {
+            tweet_id: 11,
+            author_id: 21,
+            retweeted_tweet_id: Some(12),
+            retweeted_user_id: Some(22),
+            nsfw_author_phoenix: Some(false),
+            nsfw_author: Some(true),
+            nsfw_author_ads: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(clean_origin.as_tweet_info(false).safety_label_mask, 0);
     }
 }

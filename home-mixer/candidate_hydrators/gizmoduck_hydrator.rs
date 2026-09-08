@@ -8,6 +8,29 @@ use xai_candidate_pipeline::component_library::utils::{default_quick_cache, Quic
 use xai_candidate_pipeline::hydrator::{CacheStore, CachedHydrator};
 use xai_x_thrift::user_labels::LabelValue;
 
+/// Phoenix hashes the origin author. `nsfw_author_phoenix` must be that
+/// account's bit, not the retweeter's. Filter/ads bits stay on the poster.
+pub(crate) fn phoenix_author_nsfw_bit(
+    is_retweet: bool,
+    poster_nsfw: Option<bool>,
+    origin_nsfw: Option<bool>,
+) -> Option<bool> {
+    if is_retweet {
+        origin_nsfw
+    } else {
+        poster_nsfw
+    }
+}
+
+fn phoenix_nsfw_from_safety(
+    nsfw_user: bool,
+    nsfw_admin: bool,
+    high_precision: bool,
+    possibly: bool,
+) -> bool {
+    nsfw_user || nsfw_admin || high_precision || possibly
+}
+
 pub struct GizmoduckCandidateHydrator {
     pub gizmoduck_client: Arc<dyn GizmoduckClient + Send + Sync>,
     pub cache: QuickCache<GizmoduckCacheKey, GizmoduckCacheValue>,
@@ -122,6 +145,7 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
                         retweet_profile.map(|x| x.screen_name.clone());
 
                     let author = user.and_then(|u| u.user.as_ref());
+                    let origin_author = retweet_user.and_then(|u| u.user.as_ref());
                     let nsfw_author: Option<bool> = author.map(|u| {
                         u.safety.nsfw_admin
                             || u.safety.nsfw_user
@@ -136,17 +160,27 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
                                 label.label_value == LabelValue::POSSIBLY_NSFW_ACCOUNT.0
                             })
                     });
-                    let nsfw_author_phoenix: Option<bool> = author.map(|u| {
-                        u.safety.nsfw_user
-                            || u.safety.nsfw_admin
-                            || u.labels.labels.iter().any(|l| {
-                                matches!(
-                                    LabelValue(l.label_value),
-                                    LabelValue::NSFW_HIGH_PRECISION
-                                        | LabelValue::POSSIBLY_NSFW_ACCOUNT
-                                )
-                            })
-                    });
+                    let phoenix_nsfw = |u: &_| {
+                        phoenix_nsfw_from_safety(
+                            u.safety.nsfw_user,
+                            u.safety.nsfw_admin,
+                            u.labels
+                                .labels
+                                .iter()
+                                .any(|l| l.label_value == LabelValue::NSFW_HIGH_PRECISION.0),
+                            u.labels
+                                .labels
+                                .iter()
+                                .any(|l| l.label_value == LabelValue::POSSIBLY_NSFW_ACCOUNT.0),
+                        )
+                    };
+                    let poster_phoenix = author.map(phoenix_nsfw);
+                    let origin_phoenix = origin_author.map(phoenix_nsfw);
+                    let nsfw_author_phoenix = phoenix_author_nsfw_bit(
+                        candidate.retweeted_user_id.is_some(),
+                        poster_phoenix,
+                        origin_phoenix,
+                    );
 
                     Ok(PostCandidate {
                         author_followers_count,
@@ -190,4 +224,43 @@ pub struct GizmoduckCacheValue {
     pub nsfw_author: Option<bool>,
     pub nsfw_author_ads: Option<bool>,
     pub nsfw_author_phoenix: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phoenix_bit_uses_poster_on_originals() {
+        assert_eq!(
+            phoenix_author_nsfw_bit(false, Some(true), Some(false)),
+            Some(true)
+        );
+        assert_eq!(
+            phoenix_author_nsfw_bit(false, Some(false), Some(true)),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn phoenix_bit_uses_origin_on_retweets() {
+        assert_eq!(
+            phoenix_author_nsfw_bit(true, Some(false), Some(true)),
+            Some(true)
+        );
+        assert_eq!(
+            phoenix_author_nsfw_bit(true, Some(true), Some(false)),
+            Some(false)
+        );
+        assert_eq!(phoenix_author_nsfw_bit(true, Some(true), None), None);
+    }
+
+    #[test]
+    fn phoenix_nsfw_matches_existing_label_union() {
+        assert!(phoenix_nsfw_from_safety(true, false, false, false));
+        assert!(phoenix_nsfw_from_safety(false, true, false, false));
+        assert!(phoenix_nsfw_from_safety(false, false, true, false));
+        assert!(phoenix_nsfw_from_safety(false, false, false, true));
+        assert!(!phoenix_nsfw_from_safety(false, false, false, false));
+    }
 }
