@@ -263,6 +263,14 @@ def matchesPostLabelSelector(
   hasConfiguredLabels && validAnyOf && validAllOf && matchesAnyOf && matchesAllOf
 }
 
+def requiredMatchingPosts(condition: PostLabelCountCondition): Int = {
+  if (condition.windowSize > 0 && condition.minimumMatchingPosts > condition.windowSize) {
+    condition.windowSize
+  } else {
+    condition.minimumMatchingPosts
+  }
+}
+
 def matchesPostLabelCount(
   condition: PostLabelCountCondition,
   posts: Seq[PostLabelData]
@@ -273,14 +281,14 @@ def matchesPostLabelCount(
     posts
   }
   condition.windowSize > 0 &&
-    condition.minimumMatchingPosts > 0 &&
+    requiredMatchingPosts(condition) > 0 &&
     windowPosts
       .take(condition.windowSize)
       .filter { post =>
         isRecentPost(post.tweetId, condition.maxPostAgeDays) &&
           matchesPostLabelSelector(post.labels, condition.postLabels)
       }
-      .size >= condition.minimumMatchingPosts
+      .size >= requiredMatchingPosts(condition)
 }
 
 def matchesRule(rule: UserLabelRule, posts: Seq[PostLabelData]): Boolean = {
@@ -371,7 +379,7 @@ val defaultRulesJson =
               "allOf": [
                 {
                   "windowSize": 10,
-                  "minimumMatchingPosts": 11,
+                  "minimumMatchingPosts": 10,
                   "maxPostAgeDays": 60,
                   "mediaOnly": false,
                   "postLabels": {
@@ -440,6 +448,7 @@ val export = {
   needsMediaLookup = needsMediaLookup,
   matchingOutputs = matchingOutputs,
   validRules = validRules,
+  requiredMatchingPosts = requiredMatchingPosts,
   evaluateForTest = evaluateForTest,
   maxScanSizeForTest = maxScanSizeForTest,
   defaultRulesJson = defaultRulesJson,
