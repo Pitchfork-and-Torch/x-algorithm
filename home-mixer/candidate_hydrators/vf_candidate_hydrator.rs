@@ -9,7 +9,7 @@ use tonic::async_trait;
 use xai_candidate_pipeline::hydrator::Hydrator;
 use xai_twittercontext_proto::GetTwitterContextViewer;
 use xai_twittercontext_proto::TwitterContextViewer;
-use xai_visibility_filtering::models::{Action, FilteredReason};
+use xai_visibility_filtering::models::{Action, FilteredReason, SafetyResultReason};
 use xai_visibility_filtering::vf_client::SafetyLevel;
 use xai_visibility_filtering::vf_client::SafetyLevel::{TimelineHome, TimelineHomeRecommendations};
 use xai_visibility_filtering::vf_client::{TweetVisibility, VfClient};
@@ -146,12 +146,18 @@ pub(crate) fn should_drop_ancillary(
     candidate: &PostCandidate,
     vf_results: &HashMap<u64, Result<Option<FilteredReason>>>,
 ) -> bool {
+    // Quotes and replies are the attached author's speech. Civic integrity
+    // is a do-not-amplify label on the attached post, not a policy drop on
+    // the commentary. In-network cards keep that commentary. Retweets are
+    // amplification of the labeled post and still drop.
+    let skip_civic = candidate.in_network == Some(true);
+
     for &ancestor_id in &candidate.ancestors {
         if candidate.tombstone_ancestor_ids.contains(&ancestor_id) {
             continue;
         }
         if let Some(Ok(Some(reason))) = vf_results.get(&ancestor_id)
-            && should_drop_reason(reason)
+            && should_drop_reason(reason, skip_civic)
         {
             return true;
         }
@@ -159,14 +165,14 @@ pub(crate) fn should_drop_ancillary(
 
     if let Some(quoted_id) = candidate.quoted_tweet_id
         && let Some(Ok(Some(reason))) = vf_results.get(&quoted_id)
-        && should_drop_reason(reason)
+        && should_drop_reason(reason, skip_civic)
     {
         return true;
     }
 
     if let Some(retweeted_id) = candidate.retweeted_tweet_id
         && let Some(Ok(Some(reason))) = vf_results.get(&retweeted_id)
-        && should_drop_reason(reason)
+        && should_drop_reason(reason, false)
     {
         return true;
     }
@@ -174,11 +180,114 @@ pub(crate) fn should_drop_ancillary(
     false
 }
 
-fn should_drop_reason(reason: &FilteredReason) -> bool {
+fn is_civic_integrity_drop(reason: &FilteredReason) -> bool {
+    matches!(
+        reason,
+        FilteredReason::SafetyResult(safety_result)
+            if safety_result.reason == Some(SafetyResultReason::FosnrCivicIntegrity)
+                && matches!(safety_result.action, Action::Drop(_))
+    )
+}
+
+fn should_drop_reason(reason: &FilteredReason, skip_civic: bool) -> bool {
+    if skip_civic && is_civic_integrity_drop(reason) {
+        return false;
+    }
     match reason {
         FilteredReason::SafetyResult(safety_result) => {
             matches!(safety_result.action, Action::Drop(_))
         }
-        _ => true, 
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xai_visibility_filtering::models::SafetyResult;
+
+    fn civic_drop() -> FilteredReason {
+        FilteredReason::SafetyResult(SafetyResult {
+            reason: Some(SafetyResultReason::FosnrCivicIntegrity),
+            action: Action::Drop(Default::default()),
+        })
+    }
+
+    fn dna_drop() -> FilteredReason {
+        FilteredReason::PossiblyUndesirable
+    }
+
+    fn results(id: u64, reason: FilteredReason) -> HashMap<u64, Result<Option<FilteredReason>>> {
+        HashMap::from([(id, Ok(Some(reason)))])
+    }
+
+    #[test]
+    fn in_network_quote_of_civic_is_kept() {
+        let quote = PostCandidate {
+            tweet_id: 1,
+            in_network: Some(true),
+            quoted_tweet_id: Some(99),
+            ..Default::default()
+        };
+        assert!(!should_drop_ancillary(&quote, &results(99, civic_drop())));
+    }
+
+    #[test]
+    fn in_network_reply_with_civic_ancestor_is_kept() {
+        let reply = PostCandidate {
+            tweet_id: 2,
+            in_network: Some(true),
+            in_reply_to_tweet_id: Some(88),
+            ancestors: vec![88],
+            ..Default::default()
+        };
+        assert!(!should_drop_ancillary(&reply, &results(88, civic_drop())));
+    }
+
+    #[test]
+    fn oon_quote_of_civic_is_dropped() {
+        let quote = PostCandidate {
+            tweet_id: 3,
+            in_network: Some(false),
+            quoted_tweet_id: Some(99),
+            ..Default::default()
+        };
+        assert!(should_drop_ancillary(&quote, &results(99, civic_drop())));
+    }
+
+    #[test]
+    fn in_network_retweet_of_civic_is_dropped() {
+        let retweet = PostCandidate {
+            tweet_id: 4,
+            in_network: Some(true),
+            retweeted_tweet_id: Some(77),
+            ..Default::default()
+        };
+        assert!(should_drop_ancillary(
+            &retweet,
+            &results(77, civic_drop())
+        ));
+    }
+
+    #[test]
+    fn in_network_quote_of_do_not_amplify_is_still_dropped() {
+        let quote = PostCandidate {
+            tweet_id: 5,
+            in_network: Some(true),
+            quoted_tweet_id: Some(99),
+            ..Default::default()
+        };
+        assert!(should_drop_ancillary(&quote, &results(99, dna_drop())));
+    }
+
+    #[test]
+    fn missing_in_network_quote_of_civic_is_dropped() {
+        let quote = PostCandidate {
+            tweet_id: 6,
+            in_network: None,
+            quoted_tweet_id: Some(99),
+            ..Default::default()
+        };
+        assert!(should_drop_ancillary(&quote, &results(99, civic_drop())));
     }
 }

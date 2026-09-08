@@ -10,6 +10,11 @@ const NSFW_HIGH_PRECISION_REASON: FilteredReason = FilteredReason::SafetyResult(
     action: Action::Drop(DropReason {}),
 });
 
+const CIVIC_INTEGRITY_REASON: FilteredReason = FilteredReason::SafetyResult(SafetyResult {
+    reason: Some(SafetyResultReason::FosnrCivicIntegrity),
+    action: Action::Drop(DropReason {}),
+});
+
 pub(super) const TWEET_LABEL_DROPS: &[RuleSpec] = &[
     RuleSpec::Tweet {
         name: "PdnaTweetLabelRule",
@@ -56,7 +61,7 @@ pub(super) const TWEET_LABEL_DROPS: &[RuleSpec] = &[
     RuleSpec::Tweet {
         name: "FosnrCivicIntegrityDropRule",
         when: |tweet| tweet.has_safety_label(SafetyLabelType::FOSNR_CIVIC_INTEGRITY),
-        action: RuleAction::Drop(FilteredReason::PossiblyUndesirable),
+        action: RuleAction::Drop(CIVIC_INTEGRITY_REASON),
         exempt_author: true,
     },
 ];
