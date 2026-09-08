@@ -113,6 +113,10 @@ pub struct ScoredPostsQuery {
     #[serde(skip)]
     pub served_history: Vec<ServedHistory>,
     pub who_to_follow_eligible: bool,
+    /// True only after a successful SGS mute-list read. Err leaves this false.
+    pub muted_user_ids_hydrated: bool,
+    /// True only after a successful SGS block-list read. Err leaves this false.
+    pub blocked_user_ids_hydrated: bool,
     pub feed_survey_eligible: bool,
     #[serde(serialize_with = "serialize_debug")]
     pub non_polling_timestamps: Option<NonPollingTimestamps>,
@@ -222,6 +226,8 @@ impl ScoredPostsQuery {
             request_context: String::new(),
             served_history: vec![],
             who_to_follow_eligible: false,
+            muted_user_ids_hydrated: false,
+            blocked_user_ids_hydrated: false,
             feed_survey_eligible: false,
             non_polling_timestamps: None,
             impressed_post_ids: Vec::new(),
@@ -241,6 +247,10 @@ impl ScoredPostsQuery {
 
     pub fn has_excluded_topics(&self) -> bool {
         !self.excluded_topic_ids.is_empty()
+    }
+
+    pub fn mute_block_lists_ready(&self) -> bool {
+        self.muted_user_ids_hydrated && self.blocked_user_ids_hydrated
     }
 }
 

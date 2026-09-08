@@ -14,7 +14,9 @@ use crate::clients::who_to_follow_client::{
 use crate::filters::invalid_conversation_module_filter::InvalidConversationModuleFilter;
 use crate::models::query::ScoredPostsQuery;
 use crate::params;
+use crate::query_hydrators::blocked_user_ids_query_hydrator::BlockedUserIdsQueryHydrator;
 use crate::query_hydrators::followed_user_ids_query_hydrator::FollowedUserIdsQueryHydrator;
+use crate::query_hydrators::muted_user_ids_query_hydrator::MutedUserIdsQueryHydrator;
 use crate::query_hydrators::past_request_timestamps_query_hydrator::PastRequestTimestampsQueryHydrator;
 use crate::query_hydrators::served_history_query_hydrator::ServedHistoryQueryHydrator;
 use crate::selectors::FollowingBlenderSelector;
@@ -168,6 +170,12 @@ impl FollowingCandidatePipeline {
             Box::new(PastRequestTimestampsQueryHydrator::new(Arc::clone(
                 &past_request_timestamps_client,
             ))),
+            Box::new(BlockedUserIdsQueryHydrator {
+                socialgraph_client: socialgraph_client.clone(),
+            }),
+            Box::new(MutedUserIdsQueryHydrator {
+                socialgraph_client: socialgraph_client.clone(),
+            }),
             Box::new(FollowedUserIdsQueryHydrator { socialgraph_client }),
         ];
 
