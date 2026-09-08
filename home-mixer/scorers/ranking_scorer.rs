@@ -1,4 +1,4 @@
-use crate::models::candidate::{PhoenixScores, PostCandidate, SlateContext};
+use crate::models::candidate::{CandidateHelpers, PhoenixScores, PostCandidate, SlateContext};
 use crate::models::query::ScoredPostsQuery;
 use crate::params::*;
 use crate::scorers::author_cold_start::AuthorColdStart;
@@ -573,7 +573,7 @@ impl RankingScorer {
         let mut counts = vec![0u32; candidates.len()];
         let mut author_counts: FxHashMap<u64, u32> = FxHashMap::default();
         for (idx, _) in indexed {
-            let author_id = candidates[idx].author_id;
+            let author_id = candidates[idx].get_original_author_id();
             let k = author_counts.get(&author_id).copied().unwrap_or(0);
             counts[idx] = k;
             author_counts.insert(author_id, k + 1);
@@ -857,6 +857,64 @@ mod tests {
         assert!((first - second).abs() < 1e-9);
         let expected_multiplier = RankingScorer::diversity_multiplier(decay_factor, floor, 1.0);
         assert!((third - first * expected_multiplier).abs() < 1e-9);
+    }
+
+    fn retweet_of(
+        retweeter_id: u64,
+        original_author_id: u64,
+        original_tweet_id: u64,
+    ) -> PostCandidate {
+        PostCandidate {
+            author_id: retweeter_id,
+            retweeted_user_id: Some(original_author_id),
+            retweeted_tweet_id: Some(original_tweet_id),
+            in_network: Some(true),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn author_diversity_keys_original_author_across_retweeters() {
+        let scorer = test_scorer();
+        let candidates = vec![
+            retweet_of(10, 1, 100),
+            retweet_of(20, 1, 101),
+            candidate(2, Some(true)),
+        ];
+
+        let query = query_with_flags(&[
+            ("rust_home_mixer_enable_author_diversity", "true"),
+            ("rust_home_mixer_author_diversity_decay", "0.5"),
+            ("rust_home_mixer_author_diversity_floor", "0.25"),
+            ("rust_home_mixer_value_model_mode", "weighted"),
+        ]);
+        let scored = scorer.score(&query, &candidates).await;
+
+        let first = scored[0].as_ref().unwrap().score.unwrap();
+        let second = scored[1].as_ref().unwrap().score.unwrap();
+        let other = scored[2].as_ref().unwrap().score.unwrap();
+        let expected_multiplier = RankingScorer::diversity_multiplier(0.5, 0.25, 1.0);
+
+        assert!((first - other).abs() < 1e-9);
+        assert!((second - first * expected_multiplier).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn author_diversity_does_not_decay_same_retweeter_of_distinct_authors() {
+        let scorer = test_scorer();
+        let candidates = vec![retweet_of(10, 1, 100), retweet_of(10, 2, 200)];
+
+        let query = query_with_flags(&[
+            ("rust_home_mixer_enable_author_diversity", "true"),
+            ("rust_home_mixer_author_diversity_decay", "0.5"),
+            ("rust_home_mixer_author_diversity_floor", "0.25"),
+            ("rust_home_mixer_value_model_mode", "weighted"),
+        ]);
+        let scored = scorer.score(&query, &candidates).await;
+
+        let first = scored[0].as_ref().unwrap().score.unwrap();
+        let second = scored[1].as_ref().unwrap().score.unwrap();
+        assert!((first - second).abs() < 1e-9);
     }
 
     #[tokio::test]
