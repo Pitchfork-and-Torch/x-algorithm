@@ -141,7 +141,6 @@ object UserCredV2App extends Logging {
   private[user_cred_v2] def computeTeleportWeights(
     validUserInfoPipe: TypedPipe[ValidUserInfo],
     engagementPipe: TypedPipe[Edge],
-    priorMassPipe: TypedPipe[UserMass],
     beta: Double,
   ): TypedPipe[UserMass] = {
     val engagementCounts = engagementPipe
@@ -154,14 +153,18 @@ object UserCredV2App extends Logging {
       .group
       .sum
 
+    // Exogenous like/RT share: each current valid engager contributes equally.
+    // Joining yesterday's PageRank mass here made cred the input to cred.
+    val validEngagerIds = validUserInfoPipe.map(u => (u.id, ())).group
+
     val rawEngagementWeights = engagementCounts
       .map { case ((engagerId, destinationId), count) => (engagerId, (destinationId, count)) }
       .group
       .join(totalCountsPerEngager)
-      .join(priorMassPipe.groupBy(_.id))
+      .join(validEngagerIds)
       .map {
-        case (_, (((destinationId, count), totalCount), engagerMass)) =>
-          (destinationId, engagerMass.mass * count.toDouble / totalCount.toDouble)
+        case (_, (((destinationId, count), totalCount), _)) =>
+          (destinationId, count.toDouble / totalCount.toDouble)
       }
       .group
       .sum
@@ -222,7 +225,6 @@ object UserCredV2App extends Logging {
     val teleportWeightsPipe = computeTeleportWeights(
       validUserInfoPipe,
       engagementPipe,
-      priorMassPipe,
       config.engagementTeleportBeta
     )
     val userNodePipe = getPageRankGraph(validUserInfoPipe, edgePipe)
