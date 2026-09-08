@@ -1,4 +1,6 @@
-use crate::candidate_hydrators::vf_candidate_hydrator::should_drop_ancillary;
+use crate::candidate_hydrators::vf_candidate_hydrator::{
+    reply_ancestor_ids, should_drop_ancillary,
+};
 use crate::models::candidate::PostCandidate;
 use crate::models::query::ScoredPostsQuery;
 use crate::params::EnableXaiVfClient;
@@ -46,7 +48,7 @@ impl Hydrator<ScoredPostsQuery, PostCandidate> for VFFollowingCandidateHydrator 
         let mut post_ids: Vec<u64> = Vec::new();
         for candidate in candidates {
             post_ids.push(candidate.tweet_id);
-            post_ids.extend(candidate.ancestors.iter().copied());
+            post_ids.extend(reply_ancestor_ids(candidate));
             if let Some(quoted_post_id) = candidate.quoted_tweet_id {
                 post_ids.push(quoted_post_id);
             }
