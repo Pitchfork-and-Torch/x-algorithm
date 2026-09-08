@@ -666,6 +666,30 @@ fn age_gating_cases() -> Vec<Case> {
             expected_action: Allow,
             expected_decided_by: None,
         },
+        Case {
+            name: "underage_viewer_drops_gore_without_media",
+            level: TimelineHome,
+            viewer: viewer_with_age(ViewerAge::Known(15)),
+            candidate: labeled(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION),
+            expected_action: Drop(FilteredReason::ContainNsfwMedia),
+            expected_decided_by: Some("SensitiveViewerUnderageDropRule"),
+        },
+        Case {
+            name: "logged_out_viewer_drops_gore_without_media",
+            level: TimelineHome,
+            viewer: logged_out_viewer(),
+            candidate: labeled(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION),
+            expected_action: Drop(FilteredReason::ContainNsfwMedia),
+            expected_decided_by: Some("SensitiveViewerLoggedOutDropRule"),
+        },
+        Case {
+            name: "no_stated_age_in_gating_country_drops_gore_without_media",
+            level: TimelineHome,
+            viewer: no_stated_age_viewer("gb"),
+            candidate: labeled(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION),
+            expected_action: Drop(FilteredReason::ContainNsfwMedia),
+            expected_decided_by: Some("SensitiveViewerNoStatedAgeDropRule"),
+        },
     ]
 }
 

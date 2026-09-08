@@ -210,7 +210,8 @@ fn nsfw_no_media_label_condition(context: &RuleContext<'_>) -> bool {
     let tweet = context.tweet();
     !context.viewer().is_author()
         && (tweet.has_safety_label(SafetyLabelType::NSFW_TEXT)
-            || tweet.has_safety_label(SafetyLabelType::NSFW_CARD_IMAGE))
+            || tweet.has_safety_label(SafetyLabelType::NSFW_CARD_IMAGE)
+            || tweet.has_safety_label(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION))
 }
 
 fn sensitive_base_condition(context: &RuleContext<'_>) -> bool {
@@ -629,6 +630,7 @@ mod tests {
             media_label(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION),
             no_media_label(SafetyLabelType::NSFW_TEXT),
             no_media_label(SafetyLabelType::NSFW_CARD_IMAGE),
+            no_media_label(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION),
             nsfw_author_media(),
             admin_author,
             nsfw_tweet_flag_media(),
@@ -701,6 +703,24 @@ mod tests {
             ..gating_viewer(ViewerAge::Unknown)
         };
         assert_allows(logged_out, &logged_out_viewer, &hp_no_media);
+
+        let gore_no_media = no_media_label(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION);
+        assert_drops(
+            underage,
+            &gating_viewer(ViewerAge::Known(15)),
+            &gore_no_media,
+            &reason,
+        );
+        assert_drops(logged_out, &logged_out_viewer, &gore_no_media, &reason);
+        assert_drops(
+            no_age,
+            &gating_viewer(ViewerAge::NotStated),
+            &gore_no_media,
+            &reason,
+        );
+        let mut gore_self = gore_no_media.clone();
+        gore_self.author_id = VIEWER_ID;
+        assert_allows(underage, &gating_viewer(ViewerAge::Known(15)), &gore_self);
         assert_allows(logged_out, &gating_viewer(ViewerAge::Known(15)), &hp);
 
         let mut no_flags = nsfw_tweet_flag_media();
