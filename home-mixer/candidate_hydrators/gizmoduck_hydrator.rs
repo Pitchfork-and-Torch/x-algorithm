@@ -39,6 +39,7 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
         GizmoduckCacheKey {
             author_id: candidate.author_id,
             retweeted_user_id: candidate.retweeted_user_id,
+            quoted_user_id: candidate.quoted_user_id,
         }
     }
 
@@ -47,6 +48,7 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
             author_followers_count: hydrated.author_followers_count,
             author_screen_name: hydrated.author_screen_name.clone(),
             retweeted_screen_name: hydrated.retweeted_screen_name.clone(),
+            quoted_screen_name: hydrated.quoted_screen_name.clone(),
             nsfw_author: hydrated.nsfw_author,
             nsfw_author_ads: hydrated.nsfw_author_ads,
             nsfw_author_phoenix: hydrated.nsfw_author_phoenix,
@@ -58,6 +60,7 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
             author_followers_count: value.author_followers_count,
             author_screen_name: value.author_screen_name,
             retweeted_screen_name: value.retweeted_screen_name,
+            quoted_screen_name: value.quoted_screen_name,
             nsfw_author: value.nsfw_author,
             nsfw_author_ads: value.nsfw_author_ads,
             nsfw_author_phoenix: value.nsfw_author_phoenix,
@@ -79,6 +82,12 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
                 candidates
                     .iter()
                     .filter_map(|c| c.retweeted_user_id)
+                    .map(|id| id as i64),
+            )
+            .chain(
+                candidates
+                    .iter()
+                    .filter_map(|c| c.quoted_user_id)
                     .map(|id| id as i64),
             )
             .collect::<HashSet<i64>>()
@@ -106,8 +115,17 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
                 Some(Err(err)) => Err(err.to_string()),
             };
 
-            let hydrated = match (user, retweet_user) {
-                (Ok(user), Ok(retweet_user)) => {
+            let quoted_user = candidate
+                .quoted_user_id
+                .and_then(|quoted_user_id| users.get(&(quoted_user_id as i64)));
+            let quoted_user = match quoted_user {
+                Some(Ok(Some(user))) => Ok(Some(user)),
+                Some(Ok(None)) | None => Ok(None),
+                Some(Err(err)) => Err(err.to_string()),
+            };
+
+            let hydrated = match (user, retweet_user, quoted_user) {
+                (Ok(user), Ok(retweet_user), Ok(quoted_user)) => {
                     let user_counts = user.and_then(|user| user.user.as_ref().map(|u| &u.counts));
                     let user_profile = user.and_then(|user| user.user.as_ref().map(|u| &u.profile));
 
@@ -120,6 +138,11 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
                         retweet_user.and_then(|user| user.user.as_ref().map(|u| &u.profile));
                     let retweeted_screen_name: Option<String> =
                         retweet_profile.map(|x| x.screen_name.clone());
+
+                    let quoted_profile =
+                        quoted_user.and_then(|user| user.user.as_ref().map(|u| &u.profile));
+                    let quoted_screen_name: Option<String> =
+                        quoted_profile.map(|x| x.screen_name.clone());
 
                     let author = user.and_then(|u| u.user.as_ref());
                     let nsfw_author: Option<bool> = author.map(|u| {
@@ -152,13 +175,14 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
                         author_followers_count,
                         author_screen_name,
                         retweeted_screen_name,
+                        quoted_screen_name,
                         nsfw_author,
                         nsfw_author_ads,
                         nsfw_author_phoenix,
                         ..Default::default()
                     })
                 }
-                (Err(err), _) | (_, Err(err)) => Err(err),
+                (Err(err), _, _) | (_, Err(err), _) | (_, _, Err(err)) => Err(err),
             };
             hydrated_candidates.push(hydrated);
         }
@@ -170,6 +194,7 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
         candidate.author_followers_count = hydrated.author_followers_count;
         candidate.author_screen_name = hydrated.author_screen_name;
         candidate.retweeted_screen_name = hydrated.retweeted_screen_name;
+        candidate.quoted_screen_name = hydrated.quoted_screen_name;
         candidate.nsfw_author = hydrated.nsfw_author;
         candidate.nsfw_author_ads = hydrated.nsfw_author_ads;
         candidate.nsfw_author_phoenix = hydrated.nsfw_author_phoenix;
@@ -180,6 +205,7 @@ impl CachedHydrator<ScoredPostsQuery, PostCandidate> for GizmoduckCandidateHydra
 pub struct GizmoduckCacheKey {
     pub author_id: u64,
     pub retweeted_user_id: Option<u64>,
+    pub quoted_user_id: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +213,7 @@ pub struct GizmoduckCacheValue {
     pub author_followers_count: Option<i32>,
     pub author_screen_name: Option<String>,
     pub retweeted_screen_name: Option<String>,
+    pub quoted_screen_name: Option<String>,
     pub nsfw_author: Option<bool>,
     pub nsfw_author_ads: Option<bool>,
     pub nsfw_author_phoenix: Option<bool>,

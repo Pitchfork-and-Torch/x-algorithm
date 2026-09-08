@@ -43,8 +43,7 @@ impl Filter<ScoredPostsQuery, PostCandidate> for ViewerMutedKeywordFilter {
             let mut removed = Vec::new();
 
             for candidate in candidates {
-                let tweet_text_token_sequence = tokenizer.tokenize(&candidate.tweet_text);
-                if matcher.matches(&tweet_text_token_sequence) {
+                if candidate_matches(&candidate, &tokenizer, &matcher) {
                     removed.push(candidate);
                 } else {
                     kept.push(candidate);
@@ -54,6 +53,17 @@ impl Filter<ScoredPostsQuery, PostCandidate> for ViewerMutedKeywordFilter {
             FilterResult { kept, removed }
         })
     }
+}
+
+fn candidate_matches(
+    candidate: &PostCandidate,
+    tokenizer: &TweetTokenizer,
+    matcher: &MatchTweetGroup,
+) -> bool {
+    std::iter::once(candidate.tweet_text.as_str())
+        .chain(candidate.quoted_screen_name.as_deref())
+        .filter(|text| !text.is_empty())
+        .any(|text| matcher.matches(&tokenizer.tokenize(text)))
 }
 
 #[cfg(test)]
@@ -314,5 +324,48 @@ mod tests {
         assert_eq!(result.kept.len(), 1);
         assert_eq!(result.kept[0].tweet_id, 4);
         assert_eq!(result.removed.len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drops_quote_when_quoted_author_handle_matches_muted_keyword() {
+        let filter = ViewerMutedKeywordFilter::new();
+        let query = create_test_query(vec!["spamaccount".to_string()]);
+
+        let quote = PostCandidate {
+            tweet_id: 1,
+            tweet_text: "sharing this".to_string(),
+            quoted_tweet_text: Some("ordinary news".to_string()),
+            quoted_user_id: Some(99),
+            quoted_screen_name: Some("spamaccount".to_string()),
+            author_id: 12345,
+            ..Default::default()
+        };
+
+        let result = filter.filter(&query, vec![quote, create_test_candidate(2, "sharing this")]);
+
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.kept[0].tweet_id, 2);
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].tweet_id, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keeps_quote_when_only_quoted_text_would_match_keyword() {
+        let filter = ViewerMutedKeywordFilter::new();
+        let query = create_test_query(vec!["spam".to_string()]);
+
+        let quote = PostCandidate {
+            tweet_id: 1,
+            tweet_text: "sharing this".to_string(),
+            quoted_tweet_text: Some("this is spam content".to_string()),
+            quoted_screen_name: Some("normaluser".to_string()),
+            author_id: 12345,
+            ..Default::default()
+        };
+
+        let result = filter.filter(&query, vec![quote]);
+
+        assert_eq!(result.kept.len(), 1);
+        assert!(result.removed.is_empty());
     }
 }

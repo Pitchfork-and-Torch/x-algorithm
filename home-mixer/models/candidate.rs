@@ -44,6 +44,8 @@ pub struct PostCandidate {
     pub author_followers_count: Option<i32>,
     pub author_screen_name: Option<String>,
     pub retweeted_screen_name: Option<String>,
+    #[serde(default)]
+    pub quoted_screen_name: Option<String>,
     pub visibility_reason: Option<vf::FilteredReason>,
     pub drop_ancillary_posts: Option<bool>,
     pub subscription_author_id: Option<u64>,
@@ -183,6 +185,11 @@ impl CandidateHelpers for PostCandidate {
             (self.retweeted_screen_name.clone(), self.retweeted_user_id)
         {
             screen_names.insert(retweeted_user_id, retweeted_screen_name);
+        }
+        if let (Some(quoted_screen_name), Some(quoted_user_id)) =
+            (self.quoted_screen_name.clone(), self.quoted_user_id)
+        {
+            screen_names.insert(quoted_user_id, quoted_screen_name);
         }
         screen_names
     }
