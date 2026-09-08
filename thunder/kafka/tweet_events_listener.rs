@@ -73,6 +73,30 @@ fn is_eligible_video(tweet: &Tweet) -> bool {
         .unwrap_or(false)
 }
 
+fn light_post_from_event_tweet(
+    tweet: Option<&Tweet>,
+    user: Option<&crate::schema::user::User>,
+) -> Option<LightPost> {
+    let tweet = tweet?;
+    let core_data = tweet.core_data.as_ref()?;
+    if core_data.nullcast.unwrap_or(false) {
+        return None;
+    }
+    Some(LightPost {
+        post_id: tweet.id?,
+        author_id: user?.id?,
+        created_at: core_data.created_at_secs?,
+        in_reply_to_post_id: core_data.reply.as_ref().and_then(|r| r.in_reply_to_status_id),
+        in_reply_to_user_id: core_data.reply.as_ref().and_then(|r| r.in_reply_to_user_id),
+        is_retweet: core_data.share.is_some(),
+        is_reply: core_data.reply.is_some(),
+        source_post_id: core_data.share.as_ref().and_then(|s| s.source_status_id),
+        source_user_id: core_data.share.as_ref().and_then(|s| s.source_user_id),
+        has_video: is_eligible_video(tweet),
+        conversation_id: core_data.conversation_id,
+    })
+}
+
 pub fn start_partition_lag_monitor(
     consumer: Arc<RwLock<KafkaConsumer>>,
     topic: String,
@@ -211,37 +235,24 @@ async fn process_message_batch(
 
         match data {
             TweetEventData::TweetCreateEvent(create_event) => {
-                first_post_id = create_event.tweet.as_ref().unwrap().id.unwrap();
-                first_user_id = create_event.user.as_ref().unwrap().id.unwrap();
-
-                let tweet = create_event.tweet.as_ref().unwrap();
-                let core_data = tweet.core_data.as_ref().unwrap();
-
-                if let Some(nullcast) = core_data.nullcast
-                    && nullcast
-                {
-                    continue;
+                if let Some(post) = light_post_from_event_tweet(
+                    create_event.tweet.as_ref(),
+                    create_event.user.as_ref(),
+                ) {
+                    first_post_id = post.post_id;
+                    first_user_id = post.author_id;
+                    create_tweets.push(post);
                 }
-
-                create_tweets.push(LightPost {
-                    post_id: tweet.id.unwrap(),
-                    author_id: create_event.user.as_ref().unwrap().id.unwrap(),
-                    created_at: core_data.created_at_secs.unwrap(),
-                    in_reply_to_post_id: core_data
-                        .reply
-                        .as_ref()
-                        .and_then(|r| r.in_reply_to_status_id),
-                    in_reply_to_user_id: core_data
-                        .reply
-                        .as_ref()
-                        .and_then(|r| r.in_reply_to_user_id),
-                    is_retweet: core_data.share.is_some(),
-                    is_reply: core_data.reply.is_some(),
-                    source_post_id: core_data.share.as_ref().and_then(|s| s.source_status_id),
-                    source_user_id: core_data.share.as_ref().and_then(|s| s.source_user_id),
-                    has_video: is_eligible_video(tweet),
-                    conversation_id: core_data.conversation_id,
-                });
+            }
+            TweetEventData::TweetUndeleteEvent(undelete_event) => {
+                if let Some(post) = light_post_from_event_tweet(
+                    undelete_event.tweet.as_ref(),
+                    undelete_event.user.as_ref(),
+                ) {
+                    first_post_id = post.post_id;
+                    first_user_id = post.author_id;
+                    create_tweets.push(post);
+                }
             }
             TweetEventData::TweetDeleteEvent(delete_event) => {
                 let created_at_secs = delete_event
@@ -375,5 +386,67 @@ async fn process_tweet_events(
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::tweet::{Tweet, TweetCoreData};
+    use crate::schema::user::User;
+
+    fn tweet(id: i64, author: i64, created_at: i64, nullcast: bool) -> Tweet {
+        Tweet {
+            id: Some(id),
+            core_data: Some(TweetCoreData {
+                user_id: Some(author),
+                created_at_secs: Some(created_at),
+                nullcast: Some(nullcast),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn user(id: i64) -> User {
+        User {
+            id: Some(id),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn undelete_maps_to_the_same_light_post_as_create() {
+        let t = tweet(42, 100, 1_700_000_000, false);
+        let u = user(100);
+        let from_create = light_post_from_event_tweet(Some(&t), Some(&u)).unwrap();
+        let from_undelete = light_post_from_event_tweet(Some(&t), Some(&u)).unwrap();
+        assert_eq!(from_create, from_undelete);
+        assert_eq!(from_undelete.post_id, 42);
+        assert_eq!(from_undelete.author_id, 100);
+    }
+
+    #[test]
+    fn undelete_skips_nullcast_like_create() {
+        let t = tweet(42, 100, 1_700_000_000, true);
+        let u = user(100);
+        assert!(light_post_from_event_tweet(Some(&t), Some(&u)).is_none());
+    }
+
+    #[test]
+    fn undelete_union_arm_is_not_dropped() {
+        let event = TweetEventData::TweetUndeleteEvent(
+            crate::schema::tweet_events::TweetUndeleteEvent {
+                tweet: Some(tweet(7, 9, 1_700_000_001, false)),
+                user: Some(user(9)),
+                ..Default::default()
+            },
+        );
+        let TweetEventData::TweetUndeleteEvent(undelete) = event else {
+            panic!("expected undelete arm");
+        };
+        let post = light_post_from_event_tweet(undelete.tweet.as_ref(), undelete.user.as_ref());
+        assert!(post.is_some());
+        assert_eq!(post.unwrap().post_id, 7);
     }
 }
