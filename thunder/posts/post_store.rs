@@ -333,7 +333,20 @@ impl PostStore {
                 });
 
                 let light_post_iter = light_post_iter_1.filter(|post| {
-                    !(post.is_retweet && post.source_user_id == Some(request_user_id))
+                    if post.is_retweet && post.source_user_id == Some(request_user_id) {
+                        return false;
+                    }
+                    // TweetDeleteEvent tombstones the original only. Retweets
+                    // stay on the author deque and would otherwise keep serving
+                    // the deleted post in-network.
+                    if post.is_retweet {
+                        if let Some(source_id) = post.source_post_id {
+                            if self.deleted_posts.contains_key(&source_id) {
+                                return false;
+                            }
+                        }
+                    }
+                    true
                 });
 
                 let filtered_post_iter = light_post_iter.filter(|post| {
@@ -876,5 +889,80 @@ mod tests {
         assert!(!post_ids.contains(&1_003)); 
         assert!(!post_ids.contains(&1_005)); 
         assert!(!post_ids.contains(&1_006)); 
+    }
+
+    fn light_original(post_id: i64, author_id: i64, created_at: i64) -> LightPost {
+        LightPost {
+            post_id,
+            author_id,
+            created_at,
+            in_reply_to_post_id: None,
+            in_reply_to_user_id: None,
+            is_retweet: false,
+            is_reply: false,
+            source_post_id: None,
+            source_user_id: None,
+            has_video: false,
+            conversation_id: Some(post_id),
+        }
+    }
+
+    fn light_retweet(
+        post_id: i64,
+        author_id: i64,
+        created_at: i64,
+        source_post_id: i64,
+        source_user_id: i64,
+    ) -> LightPost {
+        LightPost {
+            post_id,
+            author_id,
+            created_at,
+            in_reply_to_post_id: None,
+            in_reply_to_user_id: None,
+            is_retweet: true,
+            is_reply: false,
+            source_post_id: Some(source_post_id),
+            source_user_id: Some(source_user_id),
+            has_video: false,
+            conversation_id: Some(post_id),
+        }
+    }
+
+    #[test]
+    fn retweet_of_deleted_original_is_not_served() {
+        let store = PostStore::new(2 * 24 * 60 * 60, 0);
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        store.insert_posts(vec![
+            light_original(100, 10, current_time - 4),
+            light_retweet(200, 20, current_time - 3, 100, 10),
+            light_original(101, 11, current_time - 2),
+            light_retweet(201, 20, current_time - 1, 101, 11),
+        ]);
+
+        store.mark_as_deleted(vec![TweetDeleteEvent {
+            post_id: 100,
+            deleted_at: current_time,
+        }]);
+
+        let following: HashSet<i64> = vec![20].into_iter().collect();
+        let result = store.get_posts_from_map(
+            &store.secondary_posts_by_user,
+            &[20],
+            10,
+            &HashSet::new(),
+            &following,
+            Instant::now(),
+            1,
+        );
+        let post_ids: HashSet<i64> = result.iter().map(|p| p.post_id).collect();
+        assert!(!post_ids.contains(&200), "retweet of deleted original served");
+        assert!(post_ids.contains(&201), "retweet of live original dropped");
+        assert!(!store.posts.contains_key(&100));
+        assert!(store.deleted_posts.contains_key(&100));
     }
 }
