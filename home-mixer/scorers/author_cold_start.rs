@@ -1,4 +1,4 @@
-use crate::models::candidate::PostCandidate;
+use crate::models::candidate::{CandidateHelpers, PostCandidate};
 use crate::models::query::ScoredPostsQuery;
 use crate::params::{
     AuthorIsControl, AuthorIsTreatment, ColdStartBetaAlpha0, ColdStartBetaBeta0,
@@ -182,8 +182,9 @@ fn author_corpus(
     candidates
         .iter()
         .map(|c| {
-            let is_treatment = author_rules.get(c.author_id, AuthorIsTreatment);
-            let is_control = author_rules.get(c.author_id, AuthorIsControl);
+            let author_id = c.get_original_author_id();
+            let is_treatment = author_rules.get(author_id, AuthorIsTreatment);
+            let is_control = author_rules.get(author_id, AuthorIsControl);
             match (is_treatment, is_control) {
                 (true, _) => AuthorCorpus::Treatment,
                 (false, true) => AuthorCorpus::Control,
@@ -500,6 +501,19 @@ rust_home_mixer:
         moe_candidate_with_favs(author_id, age, view_count_on_home, 0)
     }
 
+    fn moe_retweet(
+        retweeter_id: u64,
+        origin_author_id: u64,
+        age: Duration,
+        view_count_on_home: u64,
+    ) -> PostCandidate {
+        PostCandidate {
+            retweeted_user_id: Some(origin_author_id),
+            retweeted_tweet_id: Some(9_001),
+            ..moe_candidate(retweeter_id, age, view_count_on_home)
+        }
+    }
+
     fn moe_candidate_with_favs(
         author_id: u64,
         age: Duration,
@@ -643,6 +657,28 @@ rust_home_mixer:
         assert_eq!(result[0], 90.0);
         assert_eq!(result[1], 80.0);
         assert_eq!(result[2], 90.0);
+    }
+
+    #[test]
+    fn treatment_keeps_moe_retweet_of_treatment_origin() {
+        // Retweeter 99 is unbucketed; origin 1 is treatment. Corpus must
+        // key the origin or apply_moe_ranking_policy zeros the RT.
+        let author_cold_start = cold_start_with_arms(vec![1], vec![]);
+        let candidates = vec![moe_retweet(99, 1, minutes(10), 1000)];
+        let result =
+            author_cold_start.apply(&codivert_query(false, true), &candidates, &[80.0]);
+        assert_eq!(result, vec![80.0]);
+    }
+
+    #[test]
+    fn treatment_zeros_moe_retweet_of_control_origin() {
+        // Retweeter 1 is treatment; origin 3 is control. Keying the
+        // retweeter would leak control-author MoE into treatment.
+        let author_cold_start = cold_start_with_arms(vec![1], vec![3]);
+        let candidates = vec![moe_retweet(1, 3, minutes(10), 1000)];
+        let result =
+            author_cold_start.apply(&codivert_query(false, true), &candidates, &[80.0]);
+        assert_eq!(result, vec![0.0]);
     }
 
     #[test]
