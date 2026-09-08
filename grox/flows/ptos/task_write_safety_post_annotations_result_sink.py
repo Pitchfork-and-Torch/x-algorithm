@@ -5,6 +5,9 @@ import time
 from grox.core.tasks.task import Task
 from grox.flows.ptos.constants import HIGH_FAV_THRESHOLD
 from grox.flows.ptos.disable_rules import DisableTaskForNonPtosProd
+from grox.flows.ptos.safemodel_enforce import (
+    should_apply_safemodel_nsfw_drop_labels,
+)
 from monitor.metrics import Metrics
 from grox.core.schedules.types import TaskContext
 from grox.flows.ptos.state import SafetyPtosState
@@ -16,7 +19,6 @@ from strato_http.queries.data_types import (
     SafetyPostAnnotationsResult,
     SafetyBoolMetadata,
     SafetyPtosViolatedPolicy,
-    SafetyPolicy,
     SafetyPolicyCategory,
     SafetyPolicyType,
     FoundMetadata,
@@ -404,58 +406,21 @@ class TaskWriteSafetyPostAnnotationsResultSink(Task):
 
         ptos_already_nsfw = new_bool_metadata.isNsfw
         safemodel = ctx.state(SafetyPtosState).safemodel_sex_nudity
-        if safemodel.positive and not ptos_already_nsfw:
-            safemodel_confidence_int = round(safemodel.confidence * 100)
-            safemodel_annotation = SafetyPostAnnotations(
-                tweetId=post_id,
-                violatedPolicies=[
-                    SafetyPtosViolatedPolicy(
-                        category=SafetyPolicyCategory.AdultContent,
-                        score=safemodel_confidence_int,
-                        reason="safemodel sex-and-nudity classifier detected adult content",
-                        safetyPolicy=SafetyPolicy(
-                            policyType=SafetyPolicyType.AdultContentSexualHard,
-                            confidenceScore=safemodel_confidence_int,
-                            reason="safemodel sex-and-nudity classifier detected adult content",
-                        ),
-                    ),
-                ],
-                foundMetadata=found_metadata,
-                identifier="safemodel-sex-nudity",
-                timestamp=timestamp_ms,
-            )
-            annotations_list.append(safemodel_annotation)
-            merged_bool_metadata = cls._merge_bool_metadata(
-                merged_bool_metadata,
-                SafetyBoolMetadata(
-                    isGore=False, isNsfw=True, isSoftNsfw=False, isSpam=False
-                ),
-            )
-
+        if safemodel.positive and not should_apply_safemodel_nsfw_drop_labels(
+            safemodel_positive=True,
+            ptos_confirmed_hard_nsfw=ptos_already_nsfw,
+        ):
+            # Safemodel returns R/X media buckets. The compare task already
+            # records safemodel_only_positive. Minting AdultContentSexualHard
+            # here applied NsfwHighRecall/NsfwHighPrecision and dropped OON
+            # For You for news, art, protest, and other non-violating speech.
             Metrics.counter(
-                "task.write_safety_post_annotations_result_sink.safemodel_enforced.count"
+                "task.write_safety_post_annotations_result_sink.safemodel_shadow.count"
             ).add(1)
-            safemodel_applied_labels = await cls._apply_labels_for_annotation(
-                safemodel_annotation, post=post
+            logger.info(
+                f"safemodel sex-nudity positive without PTOS AdultContentSexualHard "
+                f"for post {post_id}; not applying NSFW drop labels"
             )
-            if len(safemodel_applied_labels) > 0:
-                logger.info(
-                    f"safemodel enforce: applyLabelFromPtos applied labels {safemodel_applied_labels} for post {post_id}"
-                )
-                Metrics.counter(
-                    "task.write_safety_post_annotations_result_sink.safemodel_action.count"
-                ).add(1)
-                for label in safemodel_applied_labels:
-                    Metrics.counter(
-                        "task.write_safety_post_annotations_result_sink.safemodel_action.applied_label.count"
-                    ).add(1, attributes={"label": label})
-            else:
-                logger.info(
-                    f"safemodel enforce: applyLabelFromPtos applied no labels for post {post_id}"
-                )
-                Metrics.counter(
-                    "task.write_safety_post_annotations_result_sink.safemodel_action.empty.count"
-                ).add(1)
 
         final_result = SafetyPostAnnotationsResult(
             tweetId=post_id,
