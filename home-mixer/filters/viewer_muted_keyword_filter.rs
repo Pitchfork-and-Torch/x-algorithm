@@ -43,8 +43,7 @@ impl Filter<ScoredPostsQuery, PostCandidate> for ViewerMutedKeywordFilter {
             let mut removed = Vec::new();
 
             for candidate in candidates {
-                let tweet_text_token_sequence = tokenizer.tokenize(&candidate.tweet_text);
-                if matcher.matches(&tweet_text_token_sequence) {
+                if candidate_matches(&candidate, &tokenizer, &matcher) {
                     removed.push(candidate);
                 } else {
                     kept.push(candidate);
@@ -54,6 +53,17 @@ impl Filter<ScoredPostsQuery, PostCandidate> for ViewerMutedKeywordFilter {
             FilterResult { kept, removed }
         })
     }
+}
+
+fn candidate_matches(
+    candidate: &PostCandidate,
+    tokenizer: &TweetTokenizer,
+    matcher: &MatchTweetGroup,
+) -> bool {
+    std::iter::once(candidate.tweet_text.as_str())
+        .chain(candidate.author_screen_name.as_deref())
+        .filter(|text| !text.is_empty())
+        .any(|text| matcher.matches(&tokenizer.tokenize(text)))
 }
 
 #[cfg(test)]
@@ -314,5 +324,38 @@ mod tests {
         assert_eq!(result.kept.len(), 1);
         assert_eq!(result.kept[0].tweet_id, 4);
         assert_eq!(result.removed.len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drops_when_author_handle_matches_muted_keyword() {
+        let filter = ViewerMutedKeywordFilter::new();
+        let query = create_test_query(vec!["mutedkeyword".to_string()]);
+
+        let mut handle_only = create_test_candidate(1, "hello");
+        handle_only.author_screen_name = Some("mutedkeyword".to_string());
+
+        let mut other_handle = create_test_candidate(2, "hello");
+        other_handle.author_screen_name = Some("otheruser".to_string());
+
+        let result = filter.filter(&query, vec![handle_only, other_handle]);
+
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.kept[0].tweet_id, 2);
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].tweet_id, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keeps_when_author_handle_does_not_match() {
+        let filter = ViewerMutedKeywordFilter::new();
+        let query = create_test_query(vec!["mutedkeyword".to_string()]);
+
+        let mut candidate = create_test_candidate(1, "hello");
+        candidate.author_screen_name = Some("otheruser".to_string());
+
+        let result = filter.filter(&query, vec![candidate]);
+
+        assert_eq!(result.kept.len(), 1);
+        assert!(result.removed.is_empty());
     }
 }
