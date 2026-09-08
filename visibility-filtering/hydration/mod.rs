@@ -21,7 +21,9 @@ use batch::TweetHydrationBatch;
 use exclusive_content_hydrator::ExclusiveContentHydrator;
 use fallback_cache::FallbackCache;
 use gizmoduck_hydrator::GizmoduckAuthorHydrator;
-use safety_label_hydrator::{SafetyLabelHydration, SafetyLabelHydrator};
+use safety_label_hydrator::{
+    retain_candidates_with_usable_safety_labels, SafetyLabelHydration, SafetyLabelHydrator,
+};
 use socialgraph_hydrator::SocialgraphHydrator;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -202,9 +204,12 @@ impl HydrationPipeline {
                 (core_datas, candidates, author_features, relationships),
             ) = tokio::join!(independent_group, author_hop);
 
+            let candidates =
+                retain_candidates_with_usable_safety_labels(candidates, &safety_labels);
             let SafetyLabelHydration {
                 label_types,
                 label_response,
+                ..
             } = safety_labels;
 
             let tweet_features = self.tes_hydrator.assemble_tweet_features(

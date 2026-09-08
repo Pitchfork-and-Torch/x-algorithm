@@ -1,8 +1,8 @@
 use crate::hydration::metrics::{batch_outcome, record_batch_size, record_hydrator_request};
-use crate::models::{SafetyLabelMap, TweetId};
+use crate::models::{SafetyLabelMap, TweetCandidateInput, TweetId};
 use crate::rules::SafetyLevel;
 use crate::safety_label_source::SafetyLabelSource;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use xai_visibility_filtering_proto as vf_pb;
@@ -16,6 +16,25 @@ pub struct SafetyLabelHydrator {
 pub struct SafetyLabelHydration {
     pub label_types: HashMap<TweetId, SafetyLabelMap>,
     pub label_response: HashMap<TweetId, Arc<vf_pb::SafetyLabelMap>>,
+    pub failed_ids: HashSet<TweetId>,
+}
+
+impl SafetyLabelHydration {
+    /// Failed or omitted RTF / Manhattan reads must not look unlabeled.
+    /// NSFW_CARD_IMAGE drop and interstitial only check type presence.
+    pub(crate) fn safety_lookup_failed(&self, id: TweetId) -> bool {
+        self.failed_ids.contains(&id)
+    }
+}
+
+pub(crate) fn retain_candidates_with_usable_safety_labels(
+    candidates: Vec<TweetCandidateInput>,
+    hydration: &SafetyLabelHydration,
+) -> Vec<TweetCandidateInput> {
+    candidates
+        .into_iter()
+        .filter(|c| !hydration.safety_lookup_failed(c.tweet_id))
+        .collect()
 }
 
 impl SafetyLabelHydrator {
@@ -40,24 +59,23 @@ impl SafetyLabelHydrator {
 
         let mut label_types = HashMap::with_capacity(tweet_ids.len());
         let mut label_response = HashMap::with_capacity(tweet_ids.len());
+        let mut failed_ids = HashSet::new();
         for tweet_id in tweet_ids {
-            match resolved
-                .get(&tweet_id.0)
-                .and_then(|result| result.as_ref().ok())
-            {
-                Some(label_map) => {
+            match resolved.get(&tweet_id.0) {
+                Some(Ok(label_map)) => {
                     label_types
                         .insert(*tweet_id, SafetyLabelMap::from_proto_label_types(label_map));
                     label_response.insert(*tweet_id, Arc::clone(label_map));
                 }
-                None => {
-                    label_types.insert(*tweet_id, SafetyLabelMap::default());
+                Some(Err(_)) | None => {
+                    failed_ids.insert(*tweet_id);
                 }
             }
         }
         SafetyLabelHydration {
             label_types,
             label_response,
+            failed_ids,
         }
     }
 }
@@ -65,14 +83,14 @@ impl SafetyLabelHydrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{SafetyLabelType, TweetId};
+    use crate::models::{resolve_candidate, RawCandidate, SafetyLabelType, TweetId};
     use crate::rules::SafetyLevel;
     use crate::safety_label_source::lookup::RemoteSource;
     use crate::safety_label_source::manhattan::ManhattanSource;
     use crate::safety_label_source::mh_client::{FetchResult, ManhattanLabelFetcher};
     use crate::safety_label_source::twemcache::{CacheRead, TwemcacheSource};
     use crate::twemcache::{Key, Value};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
     use tonic::async_trait;
     use xai_manhattan::ManhattanError;
@@ -166,10 +184,11 @@ mod tests {
         assert!(!result.label_types[&TweetId(2)].has_label(SafetyLabelType::SPAM));
         assert!(result.label_response.contains_key(&TweetId(1)));
         assert!(result.label_response.contains_key(&TweetId(2)));
+        assert!(result.failed_ids.is_empty());
     }
 
     #[tokio::test]
-    async fn hydrate_fails_open_on_lookup_errors() {
+    async fn hydrate_fails_closed_on_lookup_errors() {
         let tweet_ids = vec![TweetId(1)];
         let hydrator = hydrator(
             HashMap::new(),
@@ -181,12 +200,13 @@ mod tests {
             .hydrate(&tweet_ids, SafetyLevel::TimelineHome)
             .await;
 
-        assert!(!result.label_types[&TweetId(1)].has_label(SafetyLabelType::SPAM));
+        assert!(result.safety_lookup_failed(TweetId(1)));
+        assert!(!result.label_types.contains_key(&TweetId(1)));
         assert!(!result.label_response.contains_key(&TweetId(1)));
     }
 
     #[tokio::test]
-    async fn hydrate_fails_open_on_missing_results() {
+    async fn hydrate_keeps_confirmed_empty_label_maps() {
         let tweet_ids = vec![TweetId(1)];
         let hydrator = hydrator(HashMap::new(), HashMap::new(), None);
 
@@ -194,7 +214,58 @@ mod tests {
             .hydrate(&tweet_ids, SafetyLevel::TimelineHome)
             .await;
 
+        assert!(!result.safety_lookup_failed(TweetId(1)));
         assert!(!result.label_types[&TweetId(1)].has_label(SafetyLabelType::SPAM));
         assert!(result.label_response[&TweetId(1)].labels.is_empty());
+    }
+
+    fn candidate(tweet_id: u64) -> TweetCandidateInput {
+        resolve_candidate(
+            &RawCandidate {
+                tweet_id: TweetId(tweet_id),
+                request_author_id: Some(100),
+            },
+            &HashMap::new(),
+        )
+        .unwrap()
+    }
+
+    fn failed_hydration(ids: &[u64]) -> SafetyLabelHydration {
+        SafetyLabelHydration {
+            label_types: HashMap::new(),
+            label_response: HashMap::new(),
+            failed_ids: ids.iter().copied().map(TweetId).collect(),
+        }
+    }
+
+    #[test]
+    fn retain_drops_only_ids_whose_label_lookup_failed() {
+        let kept = retain_candidates_with_usable_safety_labels(
+            vec![candidate(10), candidate(11)],
+            &failed_hydration(&[10]),
+        );
+
+        assert_eq!(
+            kept.iter().map(|c| c.tweet_id.0).collect::<Vec<_>>(),
+            vec![11]
+        );
+    }
+
+    #[test]
+    fn confirmed_empty_map_is_not_a_lookup_failure() {
+        let hydration = SafetyLabelHydration {
+            label_types: HashMap::from([(TweetId(10), SafetyLabelMap::default())]),
+            label_response: HashMap::new(),
+            failed_ids: HashSet::new(),
+        };
+
+        assert!(!hydration.safety_lookup_failed(TweetId(10)));
+        assert_eq!(
+            retain_candidates_with_usable_safety_labels(vec![candidate(10)], &hydration)
+                .iter()
+                .map(|c| c.tweet_id.0)
+                .collect::<Vec<_>>(),
+            vec![10]
+        );
     }
 }
