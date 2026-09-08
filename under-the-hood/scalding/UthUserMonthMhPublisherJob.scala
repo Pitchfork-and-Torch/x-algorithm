@@ -165,7 +165,10 @@ object UthUserMonthMhPublisherApp {
           label <- row.label
           carried <- row.carried
           removed <- row.removed
-        } yield ((userId, monthBucket(day)), (label, dayOfMonth(day), carried, removed))
+        } yield (
+          (userId, monthBucket(day)),
+          (label, UthLabelSource.persistToken(row.source), dayOfMonth(day), carried, removed)
+        )
       },
       reducers
     )
@@ -202,24 +205,28 @@ object UthUserMonthMhPublisherApp {
 
           val postLabelAgg = labelsOpt
             .getOrElse(Nil)
-            .groupBy { case (label, _, _, _) => label }
+            .groupBy { case (label, source, _, _, _) => (label, source) }
             .map {
-              case (label, rows) =>
+              case ((label, source), rows) =>
                 val days = rows
-                  .groupBy { case (_, day, _, _) => day }
+                  .groupBy { case (_, _, day, _, _) => day }
                   .map {
                     case (day, dayRows) =>
-                      val best = dayRows.maxBy {
-                        case (_, _, carried, removed) => (carried, removed)
-                      }
-                      UthDayCarriedRemoved(Some(day), Some(best._3), Some(best._4))
+                      val (carried, removed) = dayRows
+                        .map { case (_, _, _, c, r) => (c, r) }
+                        .max
+                      UthDayCarriedRemoved(Some(day), Some(carried), Some(removed))
                   }
                   .toList
                   .sortBy(_.dayOfMonth.getOrElse(0))
-                UthPostLabelAggregate(Some(label), Some(days))
+                UthPostLabelAggregate(
+                  label = Some(label),
+                  days = Some(days),
+                  source = UthLabelSource.persistToken(source)
+                )
             }
             .toList
-            .sortBy(_.label.getOrElse(""))
+            .sortBy(a => (a.label.getOrElse(""), a.source.getOrElse("")))
 
           val accountLabelAgg = accountOpt
             .getOrElse(Nil)

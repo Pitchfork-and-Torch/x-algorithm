@@ -155,6 +155,23 @@ def sumDayCounts(days: Option[Seq[UthDayCount]]): Long =
     acc + d.count.getOrElse(0L)
   }
 
+def bestDayRow(a: UthDayCarriedRemoved, b: UthDayCarriedRemoved): UthDayCarriedRemoved = {
+  val ac = a.carried.getOrElse(0L)
+  val ar = a.removed.getOrElse(0L)
+  val bc = b.carried.getOrElse(0L)
+  val br = b.removed.getOrElse(0L)
+  if (ac > bc || (ac == bc && ar >= br)) { a } else { b }
+}
+
+def postLabelSource(source: Option[String]): String = {
+  source.map { s => s.trim.toLowerCase } match {
+    case Some("automated") => "automated"
+    case Some("manual") => "manual"
+    case Some("llm") => "llm"
+    case _ => "unknown"
+  }
+}
+
 def formatPercentage(numerator: Long, denominator: Long): String = {
   if (denominator <= 0L) {
     "0%"
@@ -189,17 +206,36 @@ def buildReportJson(
     .getOrElse(Seq.empty)
     .flatMap { agg =>
       agg.label.filter(underTheHoodLabels.isPostLabel).map { raw =>
-        val posts = sumCarried(agg.days)
+        (underTheHoodLabels.postLabelName(raw), postLabelSource(agg.source), raw, agg)
+      }
+    }
+    .groupBy { case (name, source, _, _) => (name, source) }
+    .toList
+    .flatMap { case ((name, source), rows) =>
+      val days = rows
+        .flatMap { case (_, _, _, agg) => agg.days.getOrElse(Seq.empty) }
+        .groupBy { d => d.dayOfMonth.getOrElse(0) }
+        .toList
+        .flatMap { case (_, dayRows) =>
+          dayRows.headOption.map { first =>
+            dayRows.foldLeft(first) { (best, d) => bestDayRow(best, d) }
+          }
+        }
+      val posts = sumCarried(Some(days))
+      rows.headOption.map { case (_, _, raw, _) =>
         {
-          label = underTheHoodLabels.postLabelName(raw),
+          label = name,
           about = underTheHoodLabels.postLabelAbout(raw),
           effect = underTheHoodLabels.postLabelEffect(raw),
+          source = source,
           posts = posts,
           totalPostsInMonth = postCount,
           percentageOfPosts = formatPercentage(posts, postCount),
         }
       }
     }
+    .toList
+    .sortBy { row => (row.label, row.source) }
 
   val accountLabels = userMonth.accountLabelAgg
     .getOrElse(Seq.empty)
