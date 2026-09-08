@@ -53,3 +53,21 @@ pub trait RecordProcessor: Send + Sync {
 
     fn stats(&self) -> &ProcessorStats;
 }
+
+pub fn valid_index_ids(post_id: i64, author_id: i64) -> bool {
+    post_id > 0 && author_id > 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_index_ids;
+
+    #[test]
+    fn rejects_zero_and_sentinel_ids() {
+        assert!(!valid_index_ids(0, 10));
+        assert!(!valid_index_ids(100, 0));
+        assert!(!valid_index_ids(100, -1));
+        assert!(!valid_index_ids(-5, 10));
+        assert!(valid_index_ids(100, 10));
+    }
+}

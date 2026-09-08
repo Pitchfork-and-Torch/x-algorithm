@@ -49,7 +49,7 @@ impl RecordProcessor for MainProcessor {
             let author_id = obj.author_id.unwrap_or(0);
             let index_name = obj.index_name.unwrap_or_default();
 
-            if post_id == 0 || author_id == 0 || index_name.is_empty() {
+            if !super::valid_index_ids(post_id, author_id) || index_name.is_empty() {
                 self.stats.total_invalid += 1;
                 continue;
             }
@@ -127,6 +127,22 @@ mod tests {
         let results = proc.process_batch(&raw);
         assert_eq!(results.len(), 1, "only the valid record should pass");
         assert_eq!(proc.stats().total_invalid, 3);
+        assert_eq!(proc.stats().total_success, 1);
+    }
+
+    #[test]
+    fn skip_records_with_sentinel_author_id() {
+        let mut proc = MainProcessor::new();
+        let raw = vec![
+            make_thrift_bytes(100, -1, "1fav"),
+            make_thrift_bytes(200, -1, "video"),
+            make_thrift_bytes(300, 30, "1fav"),
+        ];
+
+        let results = proc.process_batch(&raw);
+        assert_eq!(results.len(), 1, "sentinel author_id=-1 must not be indexed");
+        assert_eq!(results[0].post_id(), 300);
+        assert_eq!(proc.stats().total_invalid, 2);
         assert_eq!(proc.stats().total_success, 1);
     }
 

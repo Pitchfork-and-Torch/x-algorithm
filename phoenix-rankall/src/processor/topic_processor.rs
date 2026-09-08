@@ -48,7 +48,7 @@ impl RecordProcessor for TopicProcessor {
             let author_id = obj.author_id.unwrap_or(0);
             let index_name = obj.index_name.unwrap_or_default();
 
-            if post_id == 0 || author_id == 0 || index_name.is_empty() {
+            if !super::valid_index_ids(post_id, author_id) || index_name.is_empty() {
                 self.stats.total_invalid += 1;
                 continue;
             }
@@ -149,6 +149,20 @@ mod tests {
             }
             _ => panic!("expected Topic variant"),
         }
+    }
+
+    #[test]
+    fn skip_sentinel_author_id() {
+        let mut proc = TopicProcessor::new(Blacklist::default());
+        let raw = vec![
+            make_thrift_bytes(100, -1, "1fav_topic", None),
+            make_thrift_bytes(200, 20, "1fav_topic", None),
+        ];
+
+        let results = proc.process_batch(&raw);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].post_id(), 200);
+        assert_eq!(proc.stats().total_invalid, 1);
     }
 
     #[test]

@@ -329,7 +329,11 @@ def buildImagineIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsRece
   }
 }
 
-def buildMetadataDump(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+def buildMetadataDump(
+  candidate: PhoenixRankAllCandidate,
+  stats: Stats.StatsReceiver,
+  indexName: Option[String]
+): Unit = {
   candidate.tweetMedadata match {
     case Some(tweet) =>
       val hasImage = tweetUtil.hasImage(tweet)
@@ -343,6 +347,7 @@ def buildMetadataDump(candidate: PhoenixRankAllCandidate, stats: Stats.StatsRece
         authorFollowersCount = candidate.authorFollowers,
         engagementCount = candidate.engagementCount,
         videoDurationMs = videoDurationMsOpt,
+        indexName = indexName
       }
       #<hydra/kafka/metadataEventKafkaTopic>.insert((), flatObject)
       stats.counter("metadata_dump_created").incr(1)
@@ -406,7 +411,7 @@ val executeOp = Op.execute({ idempotent = true })[PhoenixRankAllIndexingRequest,
     case Some(post) =>
       val authorId: Option[Long] = eventProcessing.getAuthorId(post)
       authorId match {
-        case Some(id) =>
+        case Some(id) if id > 0 =>
           val unifiedPostAnnotations = eventProcessing.getUnifiedPostAnnotations(postId)
           val engagementCount = eventProcessing.getEngagementCount(postId)
           val authorFollowers = eventProcessing.getAuthorFollowers(post)
@@ -420,16 +425,24 @@ val executeOp = Op.execute({ idempotent = true })[PhoenixRankAllIndexingRequest,
             authorFollowers = authorFollowers
           }
           val hasImmersiveVideo = eventProcessing.hasImmersiveVideo(post)
+          val isNsfwAuthor = !eventProcessing.isAuthorEligible(post)
+          val isAdultPost = eventProcessing.isAdultPost(unifiedPostAnnotations)
+          val shouldDropPostByVF = eventProcessing.shouldDropPostByVF(postId)
+          val shouldDropPost = shouldDropPostByVF || isAdultPost || isNsfwAuthor
 
           if (eventSource == EvergreenVideo) {
-            if(hasImmersiveVideo) {
+            if (hasImmersiveVideo && !shouldDropPost) {
               buildEvergreenVideoIndex(candidate, receiverStats)
               numCandidatesProcessed.incr(1)
+            } else if (shouldDropPost) {
+              numSkippedPosts.incr(1)
             }
           } else if (eventSource == EvergreenNsfwVideo) {
-            if(hasImmersiveVideo) {
+            if (hasImmersiveVideo && !shouldDropPostByVF) {
               buildEvergreenNsfwVideoIndex(candidate, receiverStats)
               numCandidatesProcessed.incr(1)
+            } else if (shouldDropPostByVF) {
+              numSkippedPosts.incr(1)
             }
           } else {
             val isCommunityPost = eventProcessing.isCommunityPost(post)
@@ -440,9 +453,6 @@ val executeOp = Op.execute({ idempotent = true })[PhoenixRankAllIndexingRequest,
             }
 
             val isReply = eventProcessing.isReply(post)
-            val isAdultPost = eventProcessing.isNsfwPost(unifiedPostAnnotations)
-            val shouldDropPostByVF = eventProcessing.shouldDropPostByVF(postId)
-            val shouldDropPost = shouldDropPostByVF || isAdultPost
             if(isCommunityPost) {
               numSkippedCommunity.incr(1)
             } else if (isReply) {
@@ -452,7 +462,7 @@ val executeOp = Op.execute({ idempotent = true })[PhoenixRankAllIndexingRequest,
             } else if (shouldDropPost) {
               if (hasImmersiveVideo && eventSource == Fav && isAdultPost) {
                 buildNsfwVideoIndex(candidate, receiverStats)
-                buildMetadataDump(candidate, receiverStats)
+                buildMetadataDump(candidate, receiverStats, Some("nsfw_metadata"))
                 buildMMEmbMetadataDump(candidate, receiverStats)
               } else {
                 numSkippedPosts.incr(1)
@@ -469,21 +479,21 @@ val executeOp = Op.execute({ idempotent = true })[PhoenixRankAllIndexingRequest,
                     build1FavVideoIndex(candidate, receiverStats)
                     buildImagineIndex(candidate, receiverStats)
                   }
-                  buildMetadataDump(candidate, receiverStats)
+                  buildMetadataDump(candidate, receiverStats, Some("metadata"))
                   buildMMEmbMetadataDump(candidate, receiverStats)
                 case PostCreation =>
                   buildPostCreationIndex(candidate, receiverStats)
                   if(hasImmersiveVideo) {
                     buildVideoIndex(candidate, receiverStats)
                   }
-                  buildMetadataDump(candidate, receiverStats)
+                  buildMetadataDump(candidate, receiverStats, Some("metadata"))
                 case _ =>
                   numInvalidEventSource.incr(1)
               }
               numCandidatesProcessed.incr(1)
             }
           }
-        case None =>
+        case _ =>
           numMissingAuthorId.incr(1)
       }
     case None =>
