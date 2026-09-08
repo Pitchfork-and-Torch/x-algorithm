@@ -11,13 +11,14 @@ impl Filter<ScoredPostsQuery, PostCandidate> for DedupConversationFilter {
         _query: &ScoredPostsQuery,
         candidates: Vec<PostCandidate>,
     ) -> FilterResult<PostCandidate> {
+        let tweet_to_root = conversation_roots(&candidates);
         let mut kept: Vec<PostCandidate> = Vec::with_capacity(candidates.len());
         let mut removed: Vec<PostCandidate> = Vec::new();
         let mut best_per_convo: FxHashMap<u64, (usize, f64)> =
             FxHashMap::with_capacity_and_hasher(candidates.len(), Default::default());
 
         for candidate in candidates {
-            let conversation_id = get_conversation_id(&candidate);
+            let conversation_id = get_conversation_id(&candidate, &tweet_to_root);
             let score = candidate.score.unwrap_or(0.0);
 
             if let Some((kept_idx, best_score)) = best_per_convo.get_mut(&conversation_id) {
@@ -39,13 +40,34 @@ impl Filter<ScoredPostsQuery, PostCandidate> for DedupConversationFilter {
     }
 }
 
-fn get_conversation_id(candidate: &PostCandidate) -> u64 {
-    candidate
-        .ancestors
-        .iter()
-        .copied()
-        .min()
-        .unwrap_or_else(|| candidate.get_original_tweet_id())
+fn conversation_roots(candidates: &[PostCandidate]) -> FxHashMap<u64, u64> {
+    let mut tweet_to_root =
+        FxHashMap::with_capacity_and_hasher(candidates.len(), Default::default());
+    for candidate in candidates {
+        let Some(root) = candidate.ancestors.iter().copied().min() else {
+            continue;
+        };
+        record_root(&mut tweet_to_root, candidate.tweet_id, root);
+        for &ancestor in &candidate.ancestors {
+            record_root(&mut tweet_to_root, ancestor, root);
+        }
+    }
+    tweet_to_root
+}
+
+fn record_root(tweet_to_root: &mut FxHashMap<u64, u64>, tweet_id: u64, root: u64) {
+    tweet_to_root
+        .entry(tweet_id)
+        .and_modify(|existing| *existing = (*existing).min(root))
+        .or_insert(root);
+}
+
+fn get_conversation_id(candidate: &PostCandidate, tweet_to_root: &FxHashMap<u64, u64>) -> u64 {
+    if let Some(root) = candidate.ancestors.iter().copied().min() {
+        return root;
+    }
+    let original = candidate.get_original_tweet_id();
+    tweet_to_root.get(&original).copied().unwrap_or(original)
 }
 
 #[cfg(test)]
@@ -161,5 +183,58 @@ mod tests {
         assert_eq!(result.removed.len(), 1);
         assert_eq!(result.kept[0].tweet_id, 100);
         assert_eq!(result.kept[0].score, Some(0.8));
+    }
+
+    #[tokio::test]
+    async fn dedups_retweet_of_mid_thread_reply_with_that_reply() {
+        let filter = DedupConversationFilter;
+        let query = ScoredPostsQuery::default();
+
+        let candidates = vec![
+            retweet(100, 11, Some(0.5)),
+            candidate(11, vec![2, 1], Some(0.9)),
+        ];
+
+        let result = filter.filter(&query, candidates);
+
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.kept[0].tweet_id, 11);
+        assert_eq!(result.kept[0].score, Some(0.9));
+    }
+
+    #[tokio::test]
+    async fn dedups_retweet_of_mid_thread_reply_listed_as_sibling_ancestor() {
+        let filter = DedupConversationFilter;
+        let query = ScoredPostsQuery::default();
+
+        let candidates = vec![
+            retweet(100, 11, Some(0.8)),
+            candidate(12, vec![11, 1], Some(0.4)),
+        ];
+
+        let result = filter.filter(&query, candidates);
+
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.kept[0].tweet_id, 100);
+        assert_eq!(result.kept[0].score, Some(0.8));
+    }
+
+    #[tokio::test]
+    async fn keeps_unrelated_retweet_when_original_is_not_in_the_thread() {
+        let filter = DedupConversationFilter;
+        let query = ScoredPostsQuery::default();
+
+        let candidates = vec![
+            retweet(100, 99, Some(0.5)),
+            candidate(11, vec![2, 1], Some(0.9)),
+        ];
+
+        let result = filter.filter(&query, candidates);
+
+        assert_eq!(result.kept.len(), 2);
+        assert!(result.kept.iter().any(|c| c.tweet_id == 100));
+        assert!(result.kept.iter().any(|c| c.tweet_id == 11));
     }
 }
