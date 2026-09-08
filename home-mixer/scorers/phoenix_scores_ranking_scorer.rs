@@ -22,9 +22,10 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for PhoenixScoresRankingScorer {
             .iter()
             .map(|c| {
                 let weighted = RankingScorer::compute_weighted_score(&weights, query, c);
+                let persistable = weighted.is_finite().then_some(weighted);
                 Ok(PostCandidate {
-                    weighted_score: Some(weighted),
-                    score: Some(weighted),
+                    weighted_score: persistable,
+                    score: persistable,
                     ..Default::default()
                 })
             })
