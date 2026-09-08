@@ -22,14 +22,24 @@ fn decode_topics_pair(
             match decoded {
                 StratoResult::Ok(v) => {
                     let ft = v.v;
-                    let exp_topics = ft
-                        .as_ref()
-                        .and_then(|ft| ft.topic_ids_for_experiment(experiment).cloned());
+                    // Some([]) = lookup succeeded with no topics. None is
+                    // reserved for fetch/decode failure so Explore can fail closed.
+                    let exp_topics = Some(
+                        ft.as_ref()
+                            .and_then(|ft| ft.topic_ids_for_experiment(experiment).cloned())
+                            .unwrap_or_default(),
+                    );
                     let unf_topics = if need_unfiltered {
-                        ft.as_ref().and_then(|ft| {
-                            ft.topic_ids_for_experiment(TopicFilteringExperiment::Unfiltered)
-                                .cloned()
-                        })
+                        Some(
+                            ft.as_ref()
+                                .and_then(|ft| {
+                                    ft.topic_ids_for_experiment(
+                                        TopicFilteringExperiment::Unfiltered,
+                                    )
+                                    .cloned()
+                                })
+                                .unwrap_or_default(),
+                        )
                     } else {
                         None
                     };
