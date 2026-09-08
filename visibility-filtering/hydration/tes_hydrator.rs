@@ -1,4 +1,4 @@
-use crate::hydration::batch::TweetHydrationBatch;
+use crate::hydration::batch::{Hydrated, TweetHydrationBatch};
 use crate::hydration::metrics::{record_batch_size, timed_keyed_rpc, timed_results};
 use crate::models::{
     CoreFeature, MediaFeature, NsfwFeature, TweetCandidateInput, TweetFeatures, TweetId,
@@ -26,6 +26,37 @@ pub(crate) struct TweetHydration {
     pub(crate) takedown_reasons: TweetHydrationBatch<Vec<TakedownReason>>,
     pub(crate) edit_control: TweetHydrationBatch<EditControl>,
     pub(crate) media: TweetHydrationBatch<MediaFeature>,
+}
+
+impl TweetHydration {
+    /// TES flag RPCs that decide Drop / Interstitial. A Failed read must not
+    /// be treated as "flag unset" — that fail-opens NSFW, takedown, nullcast,
+    /// and DMCA/geo media rules. Genuine NotFound (no flag) is not Failed.
+    pub(crate) fn safety_lookup_failed(&self, id: TweetId) -> bool {
+        self.nsfw_user
+            .hydrated(&id)
+            .is_some_and(Hydrated::is_failed)
+            || self
+                .nsfw_admin
+                .hydrated(&id)
+                .is_some_and(Hydrated::is_failed)
+            || self
+                .takedown_reasons
+                .hydrated(&id)
+                .is_some_and(Hydrated::is_failed)
+            || self.nullcast.hydrated(&id).is_some_and(Hydrated::is_failed)
+            || self.media.hydrated(&id).is_some_and(Hydrated::is_failed)
+    }
+}
+
+pub(crate) fn retain_candidates_with_usable_tes_flags(
+    candidates: Vec<TweetCandidateInput>,
+    tweet_keyed: &TweetHydration,
+) -> Vec<TweetCandidateInput> {
+    candidates
+        .into_iter()
+        .filter(|c| !tweet_keyed.safety_lookup_failed(c.tweet_id))
+        .collect()
 }
 
 impl TesHydrator {
@@ -473,5 +504,101 @@ mod tests {
         let f = &features[&TweetId(10)];
         assert!(f.core.text.is_empty());
         assert!(!f.media.has_media);
+    }
+
+    fn failed_bool(id: u64) -> TweetHydrationBatch<bool> {
+        TweetHydrationBatch::from_results(
+            [TweetId(id)],
+            HashMap::from([(TweetId(id), Err::<Option<bool>, _>("tes unavailable"))]),
+        )
+    }
+
+    fn found_false(id: u64) -> TweetHydrationBatch<bool> {
+        found(id, false)
+    }
+
+    fn not_found_bool(id: u64) -> TweetHydrationBatch<bool> {
+        TweetHydrationBatch::from_results(
+            [TweetId(id)],
+            HashMap::from([(TweetId(id), Ok::<_, anyhow::Error>(None))]),
+        )
+    }
+
+    #[test]
+    fn safety_lookup_failed_is_false_when_flags_are_found_or_absent() {
+        let keyed = TweetHydration {
+            nsfw_user: found_false(10),
+            nsfw_admin: not_found_bool(10),
+            ..Default::default()
+        };
+
+        assert!(!keyed.safety_lookup_failed(TweetId(10)));
+        assert!(!TweetHydration::default().safety_lookup_failed(TweetId(10)));
+    }
+
+    #[test]
+    fn failed_nsfw_user_lookup_is_safety_failure() {
+        let keyed = TweetHydration {
+            nsfw_user: failed_bool(10),
+            ..Default::default()
+        };
+
+        assert!(keyed.safety_lookup_failed(TweetId(10)));
+        assert!(!keyed.safety_lookup_failed(TweetId(11)));
+    }
+
+    #[test]
+    fn failed_takedown_nullcast_or_media_lookup_is_safety_failure() {
+        let takedown = TweetHydration {
+            takedown_reasons: TweetHydrationBatch::from_results(
+                [TweetId(10)],
+                HashMap::from([(
+                    TweetId(10),
+                    Err::<Option<Vec<TakedownReason>>, _>("tes unavailable"),
+                )]),
+            ),
+            ..Default::default()
+        };
+        let nullcast = TweetHydration {
+            nullcast: failed_bool(10),
+            ..Default::default()
+        };
+        let media = TweetHydration {
+            media: TweetHydrationBatch::from_results(
+                [TweetId(10)],
+                HashMap::from([(
+                    TweetId(10),
+                    Err::<Option<MediaFeature>, _>("tes unavailable"),
+                )]),
+            ),
+            ..Default::default()
+        };
+
+        assert!(takedown.safety_lookup_failed(TweetId(10)));
+        assert!(nullcast.safety_lookup_failed(TweetId(10)));
+        assert!(media.safety_lookup_failed(TweetId(10)));
+    }
+
+    #[test]
+    fn retain_drops_only_ids_whose_safety_flag_rpc_failed() {
+        let keyed = TweetHydration {
+            nsfw_user: TweetHydrationBatch::from_results(
+                [TweetId(10), TweetId(11)],
+                HashMap::from([
+                    (TweetId(10), Err::<Option<bool>, _>("tes unavailable")),
+                    (TweetId(11), Ok::<_, anyhow::Error>(Some(false))),
+                ]),
+            ),
+            ..Default::default()
+        };
+        let kept = retain_candidates_with_usable_tes_flags(
+            vec![candidate(10, 100), candidate(11, 100)],
+            &keyed,
+        );
+
+        assert_eq!(
+            kept.iter().map(|c| c.tweet_id.0).collect::<Vec<_>>(),
+            vec![11]
+        );
     }
 }

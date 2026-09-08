@@ -25,6 +25,10 @@ impl<V> Hydrated<V> {
             Hydrated::NotFound | Hydrated::Failed(_) => None,
         }
     }
+
+    pub(crate) fn is_failed(&self) -> bool {
+        matches!(self, Hydrated::Failed(_))
+    }
 }
 
 impl<V, E: Display> From<Result<Option<V>, E>> for Hydrated<V> {
@@ -194,12 +198,15 @@ mod tests {
 
         assert_eq!(batch.get(&1), Some(&7));
         assert_eq!(batch.hydrated(&2), Some(&Hydrated::NotFound));
+        assert!(!Hydrated::Found(7).is_failed());
+        assert!(!Hydrated::<u32>::NotFound.is_failed());
         assert_eq!(
             batch.hydrated(&3),
             Some(&Hydrated::Failed(HydrationError::Rpc(
                 "backend unavailable".into()
             )))
         );
+        assert!(batch.hydrated(&3).is_some_and(Hydrated::is_failed));
         assert_eq!(batch.get_or_default(&2), 0);
         assert_eq!(batch.get_or_default(&3), 0);
     }
