@@ -176,9 +176,132 @@ pub(crate) fn should_drop_ancillary(
 
 fn should_drop_reason(reason: &FilteredReason) -> bool {
     match reason {
-        FilteredReason::SafetyResult(safety_result) => {
-            matches!(safety_result.action, Action::Drop(_))
-        }
-        _ => true, 
+        FilteredReason::SafetyResult(safety_result) => matches!(
+            safety_result.action,
+            // Keep-and-warn is only wired for the primary card (`visibility_reason`).
+            // An ancillary Interstitial is discarded, so the wrapper would serve
+            // NSFW/gore as a normal Allow embed. Drop the quote / RT / reply instead.
+            Action::Drop(_) | Action::Interstitial
+        ),
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xai_visibility_filtering::models::SafetyResult;
+
+    fn interstitial() -> FilteredReason {
+        FilteredReason::SafetyResult(SafetyResult {
+            reason: None,
+            action: Action::Interstitial,
+        })
+    }
+
+    fn allow() -> FilteredReason {
+        FilteredReason::SafetyResult(SafetyResult {
+            reason: None,
+            action: Action::Allow,
+        })
+    }
+
+    fn drop_action() -> FilteredReason {
+        FilteredReason::SafetyResult(SafetyResult {
+            reason: None,
+            action: Action::Drop(Default::default()),
+        })
+    }
+
+    fn results(pairs: Vec<(u64, FilteredReason)>) -> HashMap<u64, Result<Option<FilteredReason>>> {
+        pairs
+            .into_iter()
+            .map(|(id, reason)| (id, Ok(Some(reason))))
+            .collect()
+    }
+
+    #[test]
+    fn interstitial_on_quoted_sets_drop_ancillary() {
+        let quote = PostCandidate {
+            tweet_id: 1,
+            quoted_tweet_id: Some(10),
+            ..Default::default()
+        };
+        assert!(should_drop_ancillary(&quote, &results(vec![(10, interstitial())])));
+    }
+
+    #[test]
+    fn interstitial_on_retweet_source_sets_drop_ancillary() {
+        let repost = PostCandidate {
+            tweet_id: 1,
+            retweeted_tweet_id: Some(10),
+            ..Default::default()
+        };
+        assert!(should_drop_ancillary(
+            &repost,
+            &results(vec![(10, interstitial())])
+        ));
+    }
+
+    #[test]
+    fn interstitial_on_ancestor_sets_drop_ancillary() {
+        let reply = PostCandidate {
+            tweet_id: 1,
+            ancestors: vec![10],
+            ..Default::default()
+        };
+        assert!(should_drop_ancillary(
+            &reply,
+            &results(vec![(10, interstitial())])
+        ));
+    }
+
+    #[test]
+    fn tombstoned_ancestor_interstitial_is_skipped() {
+        let reply = PostCandidate {
+            tweet_id: 1,
+            ancestors: vec![10],
+            tombstone_ancestor_ids: vec![10],
+            ..Default::default()
+        };
+        assert!(!should_drop_ancillary(
+            &reply,
+            &results(vec![(10, interstitial())])
+        ));
+    }
+
+    #[test]
+    fn allow_on_ancillary_does_not_drop() {
+        let quote = PostCandidate {
+            tweet_id: 1,
+            quoted_tweet_id: Some(10),
+            ..Default::default()
+        };
+        assert!(!should_drop_ancillary(&quote, &results(vec![(10, allow())])));
+    }
+
+    #[test]
+    fn drop_on_ancillary_still_drops() {
+        let quote = PostCandidate {
+            tweet_id: 1,
+            quoted_tweet_id: Some(10),
+            ..Default::default()
+        };
+        assert!(should_drop_ancillary(
+            &quote,
+            &results(vec![(10, drop_action())])
+        ));
+    }
+
+    #[test]
+    fn primary_interstitial_without_ancillary_does_not_set_drop_flag() {
+        let primary = PostCandidate {
+            tweet_id: 1,
+            ..Default::default()
+        };
+        assert!(!should_drop_ancillary(
+            &primary,
+            &results(vec![(1, interstitial())])
+        ));
     }
 }
