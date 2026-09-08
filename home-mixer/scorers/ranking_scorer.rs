@@ -362,8 +362,21 @@ impl RankingScorer {
     // navigating to a post (i.e., coordinating via groupchat) has no
     // ranking impact. And users cannot manufacture a post to show up in
     // their Timeline in any consistently reproducible way.
+
+    /// Non-finite Phoenix heads are missing predictions, not values.
+    /// `Some(NaN)` / `Some(±Inf)` must not enter the weighted sum or the
+    /// dwell-regret slate mean — one poisoned head otherwise fail-opens into
+    /// every candidate's rank.
+    fn finite_head(score: Option<f64>) -> f64 {
+        score.filter(|s| s.is_finite()).unwrap_or(0.0)
+    }
+
     fn apply(score: Option<f64>, weight: f64) -> f64 {
-        score.unwrap_or(0.0) * weight
+        Self::finite_head(score) * weight
+    }
+
+    fn persistable_score(score: f64) -> Option<f64> {
+        score.is_finite().then_some(score)
     }
 
     pub(crate) fn compute_weighted_score(
@@ -498,13 +511,13 @@ impl RankingScorer {
         let mut mean_share_via_copy_link = 0.0;
         for c in candidates {
             let ps = &c.phoenix_scores;
-            mean_favorite += ps.favorite_score.unwrap_or(0.0);
-            mean_reply += ps.reply_score.unwrap_or(0.0);
-            mean_retweet += ps.retweet_score.unwrap_or(0.0);
-            mean_quote += ps.quote_score.unwrap_or(0.0);
-            mean_share += ps.share_score.unwrap_or(0.0);
-            mean_share_via_dm += ps.share_via_dm_score.unwrap_or(0.0);
-            mean_share_via_copy_link += ps.share_via_copy_link_score.unwrap_or(0.0);
+            mean_favorite += Self::finite_head(ps.favorite_score);
+            mean_reply += Self::finite_head(ps.reply_score);
+            mean_retweet += Self::finite_head(ps.retweet_score);
+            mean_quote += Self::finite_head(ps.quote_score);
+            mean_share += Self::finite_head(ps.share_score);
+            mean_share_via_dm += Self::finite_head(ps.share_via_dm_score);
+            mean_share_via_copy_link += Self::finite_head(ps.share_via_copy_link_score);
         }
         mean_favorite *= inv_n;
         mean_reply *= inv_n;
@@ -533,14 +546,14 @@ impl RankingScorer {
                             ps.share_via_copy_link_score,
                             mean_share_via_copy_link,
                         );
-                let negative = w.neg_not_interested * ps.not_interested_score.unwrap_or(0.0)
-                    + w.neg_block_author * ps.block_author_score.unwrap_or(0.0)
-                    + w.neg_mute_author * ps.mute_author_score.unwrap_or(0.0)
-                    + w.neg_report * ps.report_score.unwrap_or(0.0);
+                let negative = w.neg_not_interested * Self::finite_head(ps.not_interested_score)
+                    + w.neg_block_author * Self::finite_head(ps.block_author_score)
+                    + w.neg_mute_author * Self::finite_head(ps.mute_author_score)
+                    + w.neg_report * Self::finite_head(ps.report_score);
                 let modulation = 2.0
                     * Self::sigmoid(positive / temperature)
                     * (negative.min(0.0) / temperature).exp();
-                let dwell = ps.dwell_time.unwrap_or(0.0).max(w.dwell_floor).max(0.0);
+                let dwell = Self::finite_head(ps.dwell_time).max(w.dwell_floor).max(0.0);
                 dwell * modulation
             })
             .collect()
@@ -550,7 +563,7 @@ impl RankingScorer {
         if mean < DWELL_REGRET_MEAN_EPS {
             0.0
         } else {
-            p.unwrap_or(0.0) / mean - 1.0
+            Self::finite_head(p) / mean - 1.0
         }
     }
 
@@ -721,8 +734,8 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
                 .enumerate()
                 .map(|(i, (&weighted, score))| {
                     Ok(PostCandidate {
-                        weighted_score: Some(weighted),
-                        score: Some(score),
+                        weighted_score: Self::persistable_score(weighted),
+                        score: Self::persistable_score(score),
                         slate_context: persisted_contexts.as_ref().map(|contexts| contexts[i]),
                         ..Default::default()
                     })
@@ -759,8 +772,8 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for RankingScorer {
             .enumerate()
             .map(|(i, (&weighted, score))| {
                 Ok(PostCandidate {
-                    weighted_score: Some(weighted),
-                    score: Some(score),
+                    weighted_score: Self::persistable_score(weighted),
+                    score: Self::persistable_score(score),
                     slate_context: persisted_contexts.as_ref().map(|contexts| contexts[i]),
                     ..Default::default()
                 })
@@ -1567,5 +1580,122 @@ mod tests {
             weighted < 1.0,
             "weighted-mode score should be small: {weighted}"
         );
+    }
+
+    #[test]
+    fn nan_favorite_head_does_not_poison_dwell_regret_slate() {
+        let poisoned = dr_candidate(
+            1,
+            PhoenixScores {
+                favorite_score: Some(f64::NAN),
+                dwell_time: Some(10.0),
+                ..Default::default()
+            },
+        );
+        let clean = dr_candidate(
+            2,
+            PhoenixScores {
+                favorite_score: Some(0.1),
+                dwell_time: Some(10.0),
+                ..Default::default()
+            },
+        );
+        let missing = dr_candidate(
+            3,
+            PhoenixScores {
+                favorite_score: None,
+                dwell_time: Some(10.0),
+                ..Default::default()
+            },
+        );
+        let scores = RankingScorer::compute_dwell_regret_base_scores(
+            &dr_weights(),
+            &[poisoned, clean, missing],
+        );
+        assert!(
+            scores.iter().all(|s| s.is_finite()),
+            "NaN head must not NaN the slate: {scores:?}"
+        );
+        assert!(
+            (scores[0] - scores[2]).abs() < 1e-9,
+            "NaN head must match a missing head: nan={} missing={}",
+            scores[0],
+            scores[2]
+        );
+        assert!(
+            scores[1] > scores[0],
+            "finite sibling must still rank: clean={} poisoned={}",
+            scores[1],
+            scores[0]
+        );
+    }
+
+    #[test]
+    fn inf_favorite_head_does_not_win_weighted_rank() {
+        let query = query_with_flags(&[
+            ("rust_home_mixer_favorite_weight", "1.0"),
+            ("rust_home_mixer_cont_dwell_time_weight", "0.0"),
+        ]);
+        let weights = ScoringWeights::from_params(&query.params);
+        let inf = PostCandidate {
+            phoenix_scores: PhoenixScores {
+                favorite_score: Some(f64::INFINITY),
+                ..Default::default()
+            },
+            ..candidate(1, Some(true))
+        };
+        let missing = candidate(1, Some(true));
+        let liked = PostCandidate {
+            phoenix_scores: PhoenixScores {
+                favorite_score: Some(0.9),
+                ..Default::default()
+            },
+            ..candidate(2, Some(true))
+        };
+        let inf_score = RankingScorer::compute_weighted_score(&weights, &query, &inf);
+        let missing_score = RankingScorer::compute_weighted_score(&weights, &query, &missing);
+        let liked_score = RankingScorer::compute_weighted_score(&weights, &query, &liked);
+        assert!(inf_score.is_finite(), "Inf head must not emit Inf: {inf_score}");
+        assert!(
+            (inf_score - missing_score).abs() < 1e-9,
+            "Inf head must match a missing head: inf={inf_score} missing={missing_score}"
+        );
+        assert!(
+            liked_score > inf_score,
+            "finite favorite must beat Inf-as-missing: liked={liked_score} inf={inf_score}"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_finite_final_score_is_unset_for_topk() {
+        let scorer = test_scorer();
+        let query = query_with_flags(&[
+            ("rust_home_mixer_value_model_mode", "weighted"),
+            ("rust_home_mixer_enable_author_diversity", "false"),
+            ("rust_home_mixer_enable_author_size_ips", "false"),
+            ("rust_home_mixer_favorite_weight", "1.0"),
+        ]);
+        let poisoned = PostCandidate {
+            phoenix_scores: PhoenixScores {
+                favorite_score: Some(f64::NAN),
+                dwell_time: Some(f64::INFINITY),
+                ..Default::default()
+            },
+            ..dr_candidate(1, PhoenixScores::default())
+        };
+        let scored = scorer.score(&query, std::slice::from_ref(&poisoned)).await;
+        let out = scored[0].as_ref().unwrap();
+        if let Some(score) = out.score {
+            assert!(
+                score.is_finite(),
+                "persisted score must be finite or None: {score}"
+            );
+        }
+        if let Some(weighted) = out.weighted_score {
+            assert!(
+                weighted.is_finite(),
+                "persisted weighted_score must be finite or None: {weighted}"
+            );
+        }
     }
 }

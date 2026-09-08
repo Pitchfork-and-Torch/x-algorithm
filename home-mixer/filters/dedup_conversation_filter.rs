@@ -18,7 +18,10 @@ impl Filter<ScoredPostsQuery, PostCandidate> for DedupConversationFilter {
 
         for candidate in candidates {
             let conversation_id = get_conversation_id(&candidate);
-            let score = candidate.score.unwrap_or(0.0);
+            let score = candidate
+                .score
+                .filter(|s| s.is_finite())
+                .unwrap_or(0.0);
 
             if let Some((kept_idx, best_score)) = best_per_convo.get_mut(&conversation_id) {
                 if score > *best_score {
@@ -142,6 +145,24 @@ mod tests {
         assert_eq!(result.kept.len(), 1);
         assert_eq!(result.removed.len(), 1);
         assert_eq!(result.kept[0].tweet_id, 11);
+        assert_eq!(result.kept[0].score, Some(0.9));
+    }
+
+    #[tokio::test]
+    async fn nan_score_does_not_lock_the_conversation() {
+        let filter = DedupConversationFilter;
+        let query = ScoredPostsQuery::default();
+
+        let candidates = vec![
+            candidate(1, vec![42], Some(f64::NAN)),
+            candidate(2, vec![42], Some(0.9)),
+        ];
+
+        let result = filter.filter(&query, candidates);
+
+        assert_eq!(result.kept.len(), 1);
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.kept[0].tweet_id, 2);
         assert_eq!(result.kept[0].score, Some(0.9));
     }
 
