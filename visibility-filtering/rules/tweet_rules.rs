@@ -302,6 +302,8 @@ pub(super) const FILTER_ALL: &[RuleSpec] = &[RuleSpec::Tweet {
     exempt_author: false,
 }];
 
+/// TES media legal/geo drops. Shared by TimelineHome and
+/// TimelineHomeRecommendations (wired from TIMELINE_HOME_SHARED_RULES).
 pub(super) const RECS_MEDIA_DROPS: &[RuleSpec] = &[
     RuleSpec::Tweet {
         name: "DropTweetsWithDmcaMediaRule",
